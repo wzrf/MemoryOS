@@ -80,7 +80,7 @@ Continuous?""".format(
         ]
         
         return self.client.chat_completion(
-            model="gpt-4o-mini",
+            model="qwen3-8b",
             messages=messages,
             temperature=0.3,
             max_tokens=100

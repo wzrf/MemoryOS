@@ -5,8 +5,8 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 from openai import OpenAI
 gpt_client = OpenAI(
-        api_key='',
-    base_url='https://cn2us02.opapi.win/v1'
+        api_key='sk-11ce7640e46049a6977c0d96ba855ffb',
+    base_url='https://dashscope.aliyuncs.com/compatible-mode/v1'
 )
 def get_timestamp():
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
@@ -34,17 +34,19 @@ class OpenAIClient:
         openai.api_base = self.base_url
 
     def chat_completion(self, model, messages, temperature=0.7, max_tokens=2000):
+        model = "qwen3-8b"
         print("调用 GPT 接口，模型:", model)
         response = gpt_client.chat.completions.create(
             model=model,
             messages=messages,
             temperature=temperature,
-            max_tokens=max_tokens
+            max_tokens=max_tokens,
+            extra_body={"enable_thinking":False}
         )
         return response.choices[0].message.content.strip()
 
 def gpt_generate_answer(prompt, messages, client):
-    return client.chat_completion(model="gpt-4o-mini", messages=messages, temperature=0.7, max_tokens=2000)
+    return client.chat_completion(model="qwen3-8b", messages=messages, temperature=0.7, max_tokens=2000)
 
 def analyze_assistant_knowledge(dialogs, client):
     """

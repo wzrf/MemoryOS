@@ -9,14 +9,15 @@ from utils import OpenAIClient, gpt_generate_answer, gpt_extract_theme, gpt_upda
 import re
 import openai
 import time
-import tiktoken
+from concurrent.futures import ThreadPoolExecutor, as_completed
+# import tiktoken
 import os
 total_tokens = 0
 num_samples=0
 # Initialize OpenAI client
 client = OpenAIClient(
-    api_key='',
-    base_url='https://cn2us02.opapi.win/v1'
+    api_key='sk-11ce7640e46049a6977c0d96ba855ffb',
+    base_url='https://dashscope.aliyuncs.com/compatible-mode/v1'
 )
 
 # Heat threshold
@@ -138,7 +139,7 @@ def generate_system_response_with_meta(query, short_mem, long_mem, retrieval_que
         {"role": "user", "content": user_prompt}
     ]
     
-    response = client.chat_completion(model="gpt-4o-mini", messages=messages, temperature=0.7, max_tokens=2000)
+    response = client.chat_completion(model="qwen3-8b", messages=messages, temperature=0.7, max_tokens=2000)
     return response, system_prompt, user_prompt
 
 def process_conversation(conversation_data):
@@ -184,14 +185,222 @@ def process_conversation(conversation_data):
     
     return processed
 
-def main():
-    # 直接处理整个数据集，不需要命令行参数
-    print("开始处理整个locomo10数据集...")
-    
-    # 创建记忆文件存储目录
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
+import os
+
+
+def filter_qa(qa_list: list):
+    """过滤 QA 列表"""
+    try:
+        with open(
+            "./result_simplerag_fusion_rag_1.0_Qwen2.5-3B-Instruct_qwen2.5-7B_retrieve_5.json"
+        ) as f:
+            simplerag_res = json.load(f)
+            target_ids = {0, 2, 3, 4, 6, 7, 9}
+
+            simplerag_res_q = {
+                x["question"]: x["sample_id"]
+                for x in simplerag_res
+                if x["sample_id"] in target_ids
+            }
+            qa_list = [
+                qa for qa in qa_list if qa["question"] in simplerag_res_q
+            ]
+    except FileNotFoundError:
+        print("警告：未找到 filter_qa 对应的 JSON 文件，保留原始 QA 列表")
+    return qa_list
+
+
+def process_single_qa_worker(
+    qa_idx, qa, sample_id, speaker_a, speaker_b, client
+):
+    """单个 QA 处理任务的通用 Worker 函数
+
+    处理前重新根据 sample_id 从磁盘装载记忆组件，确保线程间隔离
+    """
+    question = qa.get("question")
+    original_answer = qa.get("answer", "")
+    category = qa.get("category")
+    evidence = qa.get("evidence", "")
+
+    if not original_answer:
+        original_answer = qa.get("adversarial_answer", "")
+
+    # 定义当前 sample 的记忆文件路径
+    short_mem_path = f"mem_tmp_loco_final/{sample_id}_short_term.json"
+    mid_mem_path = f"mem_tmp_loco_final/{sample_id}_mid_term.json"
+    long_mem_path = f"mem_tmp_loco_final/{sample_id}_long_term.json"
+
+    # 重新装载记忆系统组件，保证线程独立隔离
+    local_short_mem = ShortTermMemory(
+        max_capacity=5, file_path=short_mem_path
+    )
+    local_mid_mem = MidTermMemory(
+        max_capacity=2000, file_path=mid_mem_path
+    )
+    local_long_mem = LongTermMemory(file_path=long_mem_path)
+
+    local_dynamic_updater = DynamicUpdate(
+        local_short_mem,
+        local_mid_mem,
+        local_long_mem,
+        topic_similarity_threshold=0.6,
+        client=client,
+    )
+    local_retrieval_system = RetrievalAndAnswer(
+        local_short_mem,
+        local_mid_mem,
+        local_long_mem,
+        local_dynamic_updater,
+        queue_capacity=10,
+    )
+
+    # 检索与答案生成
+    retrieval_result = local_retrieval_system.retrieve(
+        question,
+        segment_threshold=0.1,
+        page_threshold=0.1,
+        knowledge_threshold=0.1,
+        client=client,
+    )
+
+    meta_data = {
+        "sample_id": sample_id,
+        "speaker_a": speaker_a,
+        "speaker_b": speaker_b,
+        "category": category,
+        "evidence": evidence,
+    }
+
+    system_answer, system_prompt, user_prompt = (
+        generate_system_response_with_meta(
+            question,
+            local_short_mem,
+            local_long_mem,
+            retrieval_result["retrieval_queue"],
+            retrieval_result["long_term_knowledge"],
+            client,
+            sample_id,
+            speaker_a,
+            speaker_b,
+            meta_data,
+        )
+    )
+
+    return qa_idx, {
+        "sample_id": sample_id,
+        "speaker_a": speaker_a,
+        "speaker_b": speaker_b,
+        "question": question,
+        "system_answer": system_answer,
+        "original_answer": original_answer,
+        "category": category,
+        "evidence": evidence,
+        "timestamp": get_timestamp(),
+    }
+
+
+def process_qa_in_parallel(
+    qa_pairs, sample_id, speaker_a, speaker_b, client, qa_max_workers=5
+):
+    """辅助函数：针对确定的 QA 列表开启多线程并发处理，并恢复原始顺序"""
+    qa_results_indexed = []
+    with ThreadPoolExecutor(max_workers=qa_max_workers) as qa_executor:
+        futures = [
+            qa_executor.submit(
+                process_single_qa_worker,
+                qa_idx,
+                qa,
+                sample_id,
+                speaker_a,
+                speaker_b,
+                client,
+            )
+            for qa_idx, qa in enumerate(qa_pairs)
+        ]
+        for future in as_completed(futures):
+            try:
+                qa_results_indexed.append(future.result())
+            except Exception as e:
+                print(f"样本 {sample_id} 处理 QA 时出错: {e}")
+
+    # 按原始 qa_idx 排序保持顺序一致
+    qa_results_indexed.sort(key=lambda x: x[0])
+    return [res for _, res in qa_results_indexed]
+
+
+def process_single_sample(sample, client, qa_max_workers=5):
+    """单个样本的完整处理逻辑（提供给 main_parallel 调用）：
+
+    1. 顺序构建/更新该 sample 的记忆
+    2. 并发处理该 sample 下的所有 QA 问答
+    """
+    sample_id = sample.get("sample_id", "unknown_sample")
+    conversation_data = sample.get("conversation", {})
+    qa_pairs = sample.get("qa", [])
+
+    processed_dialogs = process_conversation(conversation_data)
+    if not processed_dialogs:
+        print(f"样本 {sample_id} 没有有效的对话数据，跳过")
+        return []
+
+    speaker_a = conversation_data.get("speaker_a")
+    speaker_b = conversation_data.get("speaker_b")
+
+    # 1. 初始化记忆模块并顺序写入对话历史（写入过程需保持时序）
+    short_mem = ShortTermMemory(
+        max_capacity=5,
+        file_path=f"mem_tmp_loco_final/{sample_id}_short_term.json",
+    )
+    mid_mem = MidTermMemory(
+        max_capacity=2000,
+        file_path=f"mem_tmp_loco_final/{sample_id}_mid_term.json",
+    )
+    long_mem = LongTermMemory(
+        file_path=f"mem_tmp_loco_final/{sample_id}_long_term.json"
+    )
+    dynamic_updater = DynamicUpdate(
+        short_mem,
+        mid_mem,
+        long_mem,
+        topic_similarity_threshold=0.6,
+        client=client,
+    )
+
+    if not skip_build:
+        for dialog in processed_dialogs:
+            short_mem.add_qa_pair(dialog)
+            if short_mem.is_full():
+                dynamic_updater.bulk_evict_and_update_mid_term()
+            update_user_profile_from_top_segment(mid_mem, long_mem, sample_id, client)
+
+    # 2. 过滤并并发处理 QA 对
+    filtered_qa_pairs = filter_qa(qa_pairs)
+    if not filtered_qa_pairs:
+        return []
+
+    sample_results = process_qa_in_parallel(
+        filtered_qa_pairs,
+        sample_id,
+        speaker_a,
+        speaker_b,
+        client,
+        qa_max_workers=qa_max_workers,
+    )
+    print(
+        f"样本 {sample_id} 处理完成，共并发完成 {len(sample_results)} 个 QA 对"
+    )
+    return sample_results
+
+
+def main(qa_max_workers=5, total_run=10):
+    """单样本串行，但每个 Sample 内部的 QA 问答对并发处理"""
+    print("开始运行 [main]: 串行样本，并发 QA 模式...")
+
     os.makedirs("mem_tmp_loco_final", exist_ok=True)
-    
-    # Load locomo10 dataset
+
     try:
         with open("locomo10.json", "r", encoding="utf-8") as f:
             dataset = json.load(f)
@@ -202,115 +411,155 @@ def main():
     except Exception as e:
         print(f"加载数据集时出错：{e}")
         return
-    
-    # 处理整个数据集，不进行切片
-    # dataset = dataset  # 处理全部数据
-    
-    # 设置固定的输出文件名
+
     output_file = "all_loco_results.json"
-    
     results = []
+    dataset = dataset[:total_run]
     total_samples = len(dataset)
-    
+
     for idx, sample in enumerate(dataset):
-        print(f"正在处理样本 {idx + 1}/{total_samples}: {sample.get('sample_id', 'unknown')}")
-        
         sample_id = sample.get("sample_id", "unknown_sample")
-        conversation_data = sample["conversation"]
-        qa_pairs = sample["qa"]
-        
-        # Process conversation data
+        print(f"正在处理样本 {idx + 1}/{total_samples}: {sample_id}")
+
+        conversation_data = sample.get("conversation", {})
+        qa_pairs = sample.get("qa", [])
+
         processed_dialogs = process_conversation(conversation_data)
-        
         if not processed_dialogs:
             print(f"样本 {sample_id} 没有有效的对话数据，跳过")
             continue
-            
-        speaker_a = conversation_data["speaker_a"]
-        speaker_b = conversation_data["speaker_b"]
-        
-        # Initialize memory modules
-        short_mem = ShortTermMemory(max_capacity=1, file_path=f"mem_tmp_loco_final/{sample_id}_short_term.json")
-        mid_mem = MidTermMemory(max_capacity=2000, file_path=f"mem_tmp_loco_final/{sample_id}_mid_term.json")
-        long_mem = LongTermMemory(file_path=f"mem_tmp_loco_final/{sample_id}_long_term.json")
-        dynamic_updater = DynamicUpdate(short_mem, mid_mem, long_mem, topic_similarity_threshold=0.6, client=client)
-        retrieval_system = RetrievalAndAnswer(short_mem, mid_mem, long_mem, dynamic_updater, queue_capacity=10)
-        
-        # Store conversation history in memory system
-        for dialog in processed_dialogs:
-            short_mem.add_qa_pair(dialog)
-            if short_mem.is_full():
-                dynamic_updater.bulk_evict_and_update_mid_term()
-            update_user_profile_from_top_segment(mid_mem, long_mem, sample_id, client)
-        
-        # Process QA pairs
-        qa_count = len(qa_pairs)
-        for qa_idx, qa in enumerate(qa_pairs):
-            print(f"  处理问答 {qa_idx + 1}/{qa_count}")
-            question = qa["question"]
-            original_answer = qa.get("answer", "")
-            category = qa["category"]
-            evidence = qa.get("evidence", "")
-            if(original_answer == ""):
-                original_answer = qa.get("adversarial_answer", "")
-            # Retrieve and generate answer
-            retrieval_result = retrieval_system.retrieve(
-                question, 
-                segment_threshold=0.1, 
-                page_threshold=0.1, 
-                knowledge_threshold=0.1, 
-                client=client
+
+        speaker_a = conversation_data.get("speaker_a")
+        speaker_b = conversation_data.get("speaker_b")
+
+        # 1. 顺序构建记忆，落盘存储
+        short_mem = ShortTermMemory(
+            max_capacity=5,
+            file_path=f"mem_tmp_loco_final/{sample_id}_short_term.json",
+        )
+        mid_mem = MidTermMemory(
+            max_capacity=2000,
+            file_path=f"mem_tmp_loco_final/{sample_id}_mid_term.json",
+        )
+        long_mem = LongTermMemory(
+            file_path=f"mem_tmp_loco_final/{sample_id}_long_term.json"
+        )
+        dynamic_updater = DynamicUpdate(
+            short_mem,
+            mid_mem,
+            long_mem,
+            topic_similarity_threshold=0.6,
+            client=client,
+        )
+
+        if not skip_build:
+            for dialog_idx, dialog in enumerate(processed_dialogs):
+                short_mem.add_qa_pair(dialog)
+                if short_mem.is_full():
+                    dynamic_updater.bulk_evict_and_update_mid_term()
+                update_user_profile_from_top_segment(
+                    mid_mem, long_mem, sample_id, client
+                )
+                print(f"finish dialog_idx={dialog_idx}")
+                print("="*50)
+
+        # 2. 过滤 QA 并针对当前 Sample 开启多线程并发处理 QA
+        filtered_qa_pairs = filter_qa(qa_pairs)
+        if filtered_qa_pairs:
+            sample_results = process_qa_in_parallel(
+                filtered_qa_pairs,
+                sample_id,
+                speaker_a,
+                speaker_b,
+                client,
+                qa_max_workers=qa_max_workers,
             )
-            
-            # Generate meta data for the conversation
-            meta_data = {
-                "sample_id": sample_id,
-                "speaker_a": speaker_a,
-                "speaker_b": speaker_b,
-                "category": category,
-                "evidence": evidence
-            }
-            
-            system_answer, system_prompt, user_prompt = generate_system_response_with_meta(
-                question, 
-                short_mem, 
-                long_mem, 
-                retrieval_result["retrieval_queue"], 
-                retrieval_result["long_term_knowledge"],
-                client, 
-                sample_id, 
-                speaker_a, 
-                speaker_b, 
-                meta_data
-            )
-            
-            # Save result for the current QA pair
-            results.append({
-                "sample_id": sample_id,
-                "speaker_a": speaker_a,
-                "speaker_b": speaker_b,
-                "question": question,
-                "system_answer": system_answer,
-                "original_answer": original_answer,
-                "category": category,
-                "evidence": evidence,
-                "timestamp": get_timestamp(),
-            })
-    
-        # 每处理完一个样本就保存一次结果（实时保存）
+            results.extend(sample_results)
+
+        # 每处理完一个样本即保存一次文件
         try:
             with open(output_file, "w", encoding="utf-8") as f:
                 json.dump(results, f, ensure_ascii=False, indent=2)
-            print(f"样本 {idx + 1} 处理完成，结果已保存到 {output_file}")
+            print(f"样本 {idx + 1} 处理完成，结果已实时保存到 {output_file}")
         except Exception as e:
             print(f"保存结果时出错：{e}")
-    
+
     # 最终保存
     try:
         with open(output_file, "w", encoding="utf-8") as f:
             json.dump(results, f, ensure_ascii=False, indent=2)
+        print(f"[main] 运行完成，全量结果写入 {output_file}")
     except Exception as e:
         print(f"最终保存结果时出错：{e}")
 
+
+def main_parallel(sample_max_workers=5, qa_max_workers=5):
+    """多样本并发处理 (Main Parallel)，且每个 Sample 内部的 QA 也是并发处理"""
+    print(
+        f"开始运行 [main_parallel]: 多样本并发 (workers={sample_max_workers}) + QA并发 (workers={qa_max_workers})..."
+    )
+
+    os.makedirs("mem_tmp_loco_final", exist_ok=True)
+
+    try:
+        with open("locomo10.json", "r", encoding="utf-8") as f:
+            dataset = json.load(f)
+        print(f"成功加载数据集，共 {len(dataset)} 个样本")
+    except FileNotFoundError:
+        print("错误：找不到 locomo10.json 文件，请确保文件在当前目录中")
+        return
+    except Exception as e:
+        print(f"加载数据集时出错：{e}")
+        return
+
+    output_file = "all_loco_results.json"
+    results = []
+    completed_samples = 0
+    total_samples = len(dataset)
+
+    # 样本级 ThreadPoolExecutor 并发处理
+    with ThreadPoolExecutor(max_workers=sample_max_workers) as executor:
+        future_to_sample_id = {
+            executor.submit(
+                process_single_sample, sample, client, qa_max_workers
+            ): sample.get("sample_id", f"sample_{idx+1}")
+            for idx, sample in enumerate(dataset)
+        }
+
+        # 主线程统一收集计算结果并落盘写文件
+        for future in as_completed(future_to_sample_id):
+            sample_id = future_to_sample_id[future]
+            completed_samples += 1
+
+            try:
+                sample_results = future.result()
+                if sample_results:
+                    results.extend(sample_results)
+
+                    # 主线程独立负责写入文件，避免并发文件写冲突
+                    try:
+                        with open(output_file, "w", encoding="utf-8") as f:
+                            json.dump(
+                                results, f, ensure_ascii=False, indent=2
+                            )
+                        print(
+                            f"进度 [{completed_samples}/{total_samples}]: 样本 {sample_id} 结果已写入 {output_file} (累计 {len(results)} 条数据)"
+                        )
+                    except Exception as e:
+                        print(f"主线程写入文件时出错：{e}")
+
+            except Exception as e:
+                print(f"样本 {sample_id} 在子线程处理过程中发生错误：{e}")
+
+    print(
+        f"[main_parallel] 全量数据并发处理完成！最终结果保存在 {output_file}，共计 {len(results)} 条记录。"
+    )
+
+
 if __name__ == "__main__":
-    main()
+    skip_build = False
+    # 方式 1: 运行单 Sample 串行、Sample 内部 QA 并发
+    main(qa_max_workers=16, total_run=1)
+
+    # 方式 2: 运行多 Sample 并发、Sample 内部 QA 亦并发（如需切换取消下一句注释即可）
+    # main_parallel(sample_max_workers=10, qa_max_workers=16)
