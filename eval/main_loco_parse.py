@@ -17,9 +17,9 @@ num_samples=0
 # Initialize OpenAI client
 client = OpenAIClient(
     api_key='sk-11ce7640e46049a6977c0d96ba855ffb',
-    base_url='https://dashscope.aliyuncs.com/compatible-mode/v1'
+    # base_url='https://dashscope.aliyuncs.com/compatible-mode/v1'
+base_url = 'http://127.0.0.1:30004/v1/'
 )
-
 # Heat threshold
 H_THRESHOLD = 5.0
 
@@ -325,6 +325,9 @@ def process_qa_in_parallel(
                 qa_results_indexed.append(future.result())
             except Exception as e:
                 print(f"样本 {sample_id} 处理 QA 时出错: {e}")
+                import traceback
+                traceback.print_exc()
+                print("")
 
     # 按原始 qa_idx 排序保持顺序一致
     qa_results_indexed.sort(key=lambda x: x[0])

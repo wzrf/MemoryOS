@@ -6,7 +6,8 @@ from sentence_transformers import SentenceTransformer
 from openai import OpenAI
 gpt_client = OpenAI(
         api_key='sk-11ce7640e46049a6977c0d96ba855ffb',
-    base_url='https://dashscope.aliyuncs.com/compatible-mode/v1'
+    # base_url='https://dashscope.aliyuncs.com/compatible-mode/v1'
+base_url = 'http://127.0.0.1:30004/v1/'
 )
 def get_timestamp():
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
@@ -41,9 +42,15 @@ class OpenAIClient:
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
-            extra_body={"enable_thinking":False}
+            # extra_body={"enable_thinking":False}
+            extra_body={
+                "chat_template_kwargs": {
+                    "enable_thinking": False
+                }
+            }
         )
-        return response.choices[0].message.content.strip()
+        content = response.choices[0].message.content.strip()
+        return content
 
 def gpt_generate_answer(prompt, messages, client):
     return client.chat_completion(model="qwen3-8b", messages=messages, temperature=0.7, max_tokens=2000)
