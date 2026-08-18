@@ -33,12 +33,13 @@ def compute_segment_heat(session, alpha=0.8, beta=0.8, gamma=0.0001):
     return alpha * N_visit + beta * L_interaction + gamma * R_recency
 
 class MidTermMemory:
-    def __init__(self, max_capacity=7, file_path="mid_term.json"):
+    def __init__(self, embedding_model, max_capacity=7, file_path="mid_term.json"):
         self.max_capacity = max_capacity
         self.file_path = file_path
         self.sessions = {}
         self.access_frequency = defaultdict(int)
         self.heap = []
+        self.embedding_model = embedding_model
         self.load()
 
     def get_page_by_id(self, page_id):
@@ -82,7 +83,7 @@ class MidTermMemory:
 
     def add_session(self, summary, details):
         session_id = generate_id("session")
-        summary_vec = get_embedding(summary)
+        summary_vec = get_embedding_with_model(summary, self.embedding_model)
         summary_vec = normalize_vector(summary_vec).tolist()
         summary_keywords = list(llm_extract_keywords(summary, client=client))
         
@@ -91,7 +92,7 @@ class MidTermMemory:
             if "page_id" not in page:
                 page["page_id"] = generate_id("page")
             full_text = f"User: {page.get('user_input','')} Assiant: {page.get('agent_response','')}"
-            inp_vec = get_embedding(full_text)
+            inp_vec = get_embedding_with_model(full_text, self.embedding_model)
             inp_vec = normalize_vector(inp_vec).tolist()
             page_keywords = list(llm_extract_keywords(full_text, client=client))
             page["page_embedding"] = inp_vec
@@ -131,7 +132,7 @@ class MidTermMemory:
         heapq.heapify(self.heap)
 
     def insert_pages_into_session(self, summary, keyworks, pages, similarity_threshold=0.6, alpha=1.0):
-        new_summary_vec = get_embedding(summary)
+        new_summary_vec = get_embedding_with_model(summary, model=self.embedding_model)
         new_summary_vec = normalize_vector(new_summary_vec)
         new_keywords = keyworks
         
@@ -162,7 +163,7 @@ class MidTermMemory:
                     if "page_id" not in p:
                         p["page_id"] = generate_id("page")
                     full_text = f"用户: {p.get('user_input','')}"
-                    vec = get_embedding(full_text)
+                    vec = get_embedding_with_model(full_text, model=self.embedding_model)
                     vec = normalize_vector(vec).tolist()
                     p["page_embedding"] = vec
                     p["page_keywords"] = keyworks
@@ -197,7 +198,7 @@ class MidTermMemory:
         index = faiss.IndexFlatIP(dim)
         index.add(embeddings)
         
-        query_vec = get_embedding_with_model(query, model=embedding_model)
+        query_vec = get_embedding_with_model(query, model=self.embedding_model)
         query_vec = normalize_vector(query_vec)
         query_arr = np.array([query_vec], dtype=np.float32)
         distances, indices = index.search(query_arr, top_k)

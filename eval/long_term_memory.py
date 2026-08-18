@@ -3,11 +3,12 @@ import numpy as np
 from utils import get_timestamp, get_embedding, normalize_vector, get_embedding_with_model
 
 class LongTermMemory:
-    def __init__(self, file_path="long_term.json"):
+    def __init__(self, embedding_model, file_path="long_term.json"):
         self.file_path = file_path
         self.user_profiles = {}
         self.knowledge_base = []
         self.assistant_knowledge = []
+        self.embedding_model = embedding_model
         self.load()
 
     def update_user_profile(self, user_id, new_data, merge=False):
@@ -40,7 +41,7 @@ class LongTermMemory:
         if knowledge_text.strip() == "" or knowledge_text.strip() == "- None" or knowledge_text.strip() == "- None.":
             print("长期记忆：助手知识为空，不保存。")
             return
-        vec = get_embedding(knowledge_text)
+        vec = get_embedding_with_model(knowledge_text, self.embedding_model)
         vec = normalize_vector(vec).tolist()
         entry = {
             "knowledge": knowledge_text,
@@ -69,7 +70,7 @@ class LongTermMemory:
         if knowledge_text.strip() == "" or knowledge_text.strip() == "- None"or knowledge_text.strip() == "- None.":
             print("长期记忆：私有知识为空，不保存。")
             return
-        vec = get_embedding(knowledge_text)
+        vec = get_embedding_with_model(knowledge_text, self.embedding_model)
         vec = normalize_vector(vec).tolist()
         entry = {
             "knowledge": knowledge_text,
@@ -86,7 +87,7 @@ class LongTermMemory:
     def search_knowledge(self, query, embedding_model, threshold=0.1, top_k=10):
         if not self.knowledge_base:
             return []
-        query_vec = get_embedding_with_model(query, model=embedding_model)
+        query_vec = get_embedding_with_model(query, model=self.embedding_model)
         query_vec = normalize_vector(query_vec)
         embeddings = []
         for entry in self.knowledge_base:
