@@ -1,4 +1,6 @@
 import json
+import os
+
 import numpy as np
 from collections import defaultdict
 import faiss
@@ -6,11 +8,14 @@ import heapq
 from utils import get_timestamp, generate_id, get_embedding, normalize_vector, llm_extract_keywords
 from datetime import datetime
 from utils import OpenAIClient
-from utils import get_timestamp, generate_id, get_embedding, normalize_vector, llm_extract_keywords, compute_time_decay
+from utils import get_timestamp, generate_id, get_embedding, normalize_vector, llm_extract_keywords, compute_time_decay, get_embedding_with_model
 
 client = OpenAIClient(
     api_key='',
-    base_url='https://cn2us02.opapi.win/v1'
+    base_url='https://cn2us02.opapi.win/v1',
+    recomputation_rate=float(os.environ.get("recomputation_rate")),
+    sglang_url="http://127.0.0.1:30003/v1/completions",
+    sglang_url_prefiller="http://127.0.0.1:30003/v1/completions"
 )
 
 def compute_recency(last_visit_time, tau=24):
@@ -182,7 +187,7 @@ class MidTermMemory:
         self.rebuild_heap()
         self.save()
 
-    def search_sessions_by_summary(self, query, client, segment_threshold=0.8, page_threshold=0.7, top_k=5, tau=3600, gamma=0.5, alpha=1.0):
+    def search_sessions_by_summary(self, query, client, embedding_model, segment_threshold=0.8, page_threshold=0.7, top_k=5, tau=3600, gamma=0.5, alpha=1.0):
         if not self.sessions:
             return []
         
@@ -192,7 +197,7 @@ class MidTermMemory:
         index = faiss.IndexFlatIP(dim)
         index.add(embeddings)
         
-        query_vec = get_embedding(query)
+        query_vec = get_embedding_with_model(query, model=embedding_model)
         query_vec = normalize_vector(query_vec)
         query_arr = np.array([query_vec], dtype=np.float32)
         distances, indices = index.search(query_arr, top_k)
@@ -225,7 +230,7 @@ class MidTermMemory:
                 matched_pages = []
                 for page in session["details"]:
                     full_text = f"{page.get('user_input','')}{page.get('timestamp','')}{page.get('agent_response','')}"
-                    pvec = np.array(get_embedding(full_text), dtype=np.float32)
+                    pvec = np.array(get_embedding_with_model(full_text, model=embedding_model), dtype=np.float32)
                     pvec = normalize_vector(pvec)
                     sim_page = float(np.dot(pvec, query_vec))
                     if sim_page >= page_threshold:

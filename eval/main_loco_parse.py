@@ -7,6 +7,7 @@ from dynamic_update import DynamicUpdate
 from retrieval_and_answer import RetrievalAndAnswer
 from utils import OpenAIClient, gpt_generate_answer, gpt_extract_theme, gpt_update_profile, gpt_generate_multi_summary, get_timestamp, llm_extract_keywords, gpt_personality_analysis
 import re
+from judge import AnswerJudge
 import openai
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -18,7 +19,10 @@ num_samples=0
 client = OpenAIClient(
     api_key='sk-11ce7640e46049a6977c0d96ba855ffb',
     # base_url='https://dashscope.aliyuncs.com/compatible-mode/v1'
-base_url = 'http://127.0.0.1:30004/v1/'
+    base_url = 'http://127.0.0.1:30004/v1/',
+    recomputation_rate=float(os.environ.get("recomputation_rate")),
+    sglang_url="http://127.0.0.1:30003/v1/completions",
+    sglang_url_prefiller="http://127.0.0.1:30003/v1/completions"
 )
 # Heat threshold
 H_THRESHOLD = 5.0
@@ -139,8 +143,8 @@ def generate_system_response_with_meta(query, short_mem, long_mem, retrieval_que
         {"role": "user", "content": user_prompt}
     ]
     
-    response = client.chat_completion(model="qwen3-8b", messages=messages, temperature=0.7, max_tokens=2000)
-    return response, system_prompt, user_prompt
+    response, usage = client.chat_completion_with_usage(model="qwen3-8b", messages=messages, temperature=0.7, max_tokens=2000)
+    return response, system_prompt, user_prompt, usage.prompt_tokens, usage.completion_tokens
 
 def process_conversation(conversation_data):
     """
@@ -192,6 +196,7 @@ import os
 
 
 def filter_qa(qa_list: list):
+    return qa_list[:200]
     """过滤 QA 列表"""
     try:
         with open(
@@ -214,7 +219,7 @@ def filter_qa(qa_list: list):
 
 
 def process_single_qa_worker(
-    qa_idx, qa, sample_id, speaker_a, speaker_b, client
+    qa_idx, qa, sample_id, speaker_a, speaker_b, client, embedding_model
 ):
     """单个 QA 处理任务的通用 Worker 函数
 
@@ -229,9 +234,9 @@ def process_single_qa_worker(
         original_answer = qa.get("adversarial_answer", "")
 
     # 定义当前 sample 的记忆文件路径
-    short_mem_path = f"mem_tmp_loco_final/{sample_id}_short_term.json"
-    mid_mem_path = f"mem_tmp_loco_final/{sample_id}_mid_term.json"
-    long_mem_path = f"mem_tmp_loco_final/{sample_id}_long_term.json"
+    short_mem_path = f"{mem_dir}/{sample_id}_short_term.json"
+    mid_mem_path = f"{mem_dir}/{sample_id}_mid_term.json"
+    long_mem_path = f"{mem_dir}/{sample_id}_long_term.json"
 
     # 重新装载记忆系统组件，保证线程独立隔离
     local_short_mem = ShortTermMemory(
@@ -264,7 +269,9 @@ def process_single_qa_worker(
         page_threshold=0.1,
         knowledge_threshold=0.1,
         client=client,
+        embedding_model=embedding_model
     )
+
 
     meta_data = {
         "sample_id": sample_id,
@@ -274,7 +281,7 @@ def process_single_qa_worker(
         "evidence": evidence,
     }
 
-    system_answer, system_prompt, user_prompt = (
+    system_answer, system_prompt, user_prompt, prompt_tokens, completion_tokens = (
         generate_system_response_with_meta(
             question,
             local_short_mem,
@@ -289,8 +296,24 @@ def process_single_qa_worker(
         )
     )
 
+    print(f"\033[93muser_prompt = {user_prompt}\033[0m")
+
+    aj = AnswerJudge(
+        api_key="sk-11ce7640e46049a6977c0d96ba855ffb",
+        api_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        model="deepseek-v3.2"
+    )
+    result = aj.judge(
+        question=question,
+        golden_answer=original_answer,
+        generated_answer=system_answer,
+    )
+
+
     return qa_idx, {
         "sample_id": sample_id,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
         "speaker_a": speaker_a,
         "speaker_b": speaker_b,
         "question": question,
@@ -299,6 +322,7 @@ def process_single_qa_worker(
         "category": category,
         "evidence": evidence,
         "timestamp": get_timestamp(),
+        "correct": result.lower() == "correct",
     }
 
 
@@ -307,9 +331,24 @@ def process_qa_in_parallel(
 ):
     """辅助函数：针对确定的 QA 列表开启多线程并发处理，并恢复原始顺序"""
     qa_results_indexed = []
+    from sentence_transformers import SentenceTransformer
+    model_path = "/mnt/qjhs-sh-lab-01/models/all-MiniLM-L6-v2"
+    if not os.path.exists(model_path):
+        model_path = "/mnt/data/models/all-MiniLM-L6-v2"
+        if not os.path.exists(model_path):
+            model_path = "all-MiniLM-L6-v2"
+    embedding_models = [
+        SentenceTransformer(model_path)
+        for _ in range(qa_max_workers)
+    ]
     with ThreadPoolExecutor(max_workers=qa_max_workers) as qa_executor:
-        futures = [
-            qa_executor.submit(
+        futures = []
+
+        for qa_idx, qa in enumerate(qa_pairs):
+            worker_id = qa_idx % qa_max_workers
+            embedding_model = embedding_models[worker_id]
+
+            future = qa_executor.submit(
                 process_single_qa_worker,
                 qa_idx,
                 qa,
@@ -317,17 +356,21 @@ def process_qa_in_parallel(
                 speaker_a,
                 speaker_b,
                 client,
+                embedding_model,
             )
-            for qa_idx, qa in enumerate(qa_pairs)
-        ]
+
+            futures.append(future)
+
         for future in as_completed(futures):
             try:
                 qa_results_indexed.append(future.result())
+
             except Exception as e:
-                print(f"样本 {sample_id} 处理 QA 时出错: {e}")
+                print(
+                    f"样本 {sample_id} 处理 QA 时出错: {e}"
+                )
                 import traceback
                 traceback.print_exc()
-                print("")
 
     # 按原始 qa_idx 排序保持顺序一致
     qa_results_indexed.sort(key=lambda x: x[0])
@@ -355,14 +398,14 @@ def process_single_sample(sample, client, qa_max_workers=5):
     # 1. 初始化记忆模块并顺序写入对话历史（写入过程需保持时序）
     short_mem = ShortTermMemory(
         max_capacity=5,
-        file_path=f"mem_tmp_loco_final/{sample_id}_short_term.json",
+        file_path=f"{mem_dir}/{sample_id}_short_term.json",
     )
     mid_mem = MidTermMemory(
         max_capacity=2000,
-        file_path=f"mem_tmp_loco_final/{sample_id}_mid_term.json",
+        file_path=f"{mem_dir}/{sample_id}_mid_term.json",
     )
     long_mem = LongTermMemory(
-        file_path=f"mem_tmp_loco_final/{sample_id}_long_term.json"
+        file_path=f"{mem_dir}/{sample_id}_long_term.json"
     )
     dynamic_updater = DynamicUpdate(
         short_mem,
@@ -398,11 +441,11 @@ def process_single_sample(sample, client, qa_max_workers=5):
     return sample_results
 
 
-def main(qa_max_workers=5, total_run=10):
+def main(qa_max_workers=5, total_run=10, output_file=""):
     """单样本串行，但每个 Sample 内部的 QA 问答对并发处理"""
     print("开始运行 [main]: 串行样本，并发 QA 模式...")
 
-    os.makedirs("mem_tmp_loco_final", exist_ok=True)
+    os.makedirs(mem_dir, exist_ok=True)
 
     try:
         with open("locomo10.json", "r", encoding="utf-8") as f:
@@ -415,7 +458,6 @@ def main(qa_max_workers=5, total_run=10):
         print(f"加载数据集时出错：{e}")
         return
 
-    output_file = "all_loco_results.json"
     results = []
     dataset = dataset[:total_run]
     total_samples = len(dataset)
@@ -438,14 +480,14 @@ def main(qa_max_workers=5, total_run=10):
         # 1. 顺序构建记忆，落盘存储
         short_mem = ShortTermMemory(
             max_capacity=5,
-            file_path=f"mem_tmp_loco_final/{sample_id}_short_term.json",
+            file_path=f"{mem_dir}/{sample_id}_short_term.json",
         )
         mid_mem = MidTermMemory(
             max_capacity=2000,
-            file_path=f"mem_tmp_loco_final/{sample_id}_mid_term.json",
+            file_path=f"{mem_dir}/{sample_id}_mid_term.json",
         )
         long_mem = LongTermMemory(
-            file_path=f"mem_tmp_loco_final/{sample_id}_long_term.json"
+            file_path=f"{mem_dir}/{sample_id}_long_term.json"
         )
         dynamic_updater = DynamicUpdate(
             short_mem,
@@ -454,6 +496,14 @@ def main(qa_max_workers=5, total_run=10):
             topic_similarity_threshold=0.6,
             client=client,
         )
+
+        if len(short_mem.memory) > 0:
+            start_sign = short_mem.memory[-1]
+            for start_idx, dialog in enumerate(processed_dialogs):
+                if dialog == start_sign:
+                    processed_dialogs = processed_dialogs[start_idx+1:]
+                    break
+
 
         if not skip_build:
             for dialog_idx, dialog in enumerate(processed_dialogs):
@@ -496,13 +546,13 @@ def main(qa_max_workers=5, total_run=10):
         print(f"最终保存结果时出错：{e}")
 
 
-def main_parallel(sample_max_workers=5, qa_max_workers=5):
+def main_parallel(sample_max_workers=5, qa_max_workers=5, output_file=""):
     """多样本并发处理 (Main Parallel)，且每个 Sample 内部的 QA 也是并发处理"""
     print(
         f"开始运行 [main_parallel]: 多样本并发 (workers={sample_max_workers}) + QA并发 (workers={qa_max_workers})..."
     )
 
-    os.makedirs("mem_tmp_loco_final", exist_ok=True)
+    os.makedirs(mem_dir, exist_ok=True)
 
     try:
         with open("locomo10.json", "r", encoding="utf-8") as f:
@@ -515,7 +565,6 @@ def main_parallel(sample_max_workers=5, qa_max_workers=5):
         print(f"加载数据集时出错：{e}")
         return
 
-    output_file = "all_loco_results.json"
     results = []
     completed_samples = 0
     total_samples = len(dataset)
@@ -560,9 +609,15 @@ def main_parallel(sample_max_workers=5, qa_max_workers=5):
 
 
 if __name__ == "__main__":
+    mem_dir = "mem_tmp_loco_final"
+    fusionrag_tag = os.environ.get("FUSIONRAG", "false").lower()
+    result_file = "./results/locomo_result.json"
+    if fusionrag_tag == "true":
+        mem_dir = "mem_tmp_loco_fusionrag"
+        result_file = "./results/locomo_result_fusionrag.json"
     skip_build = False
-    # 方式 1: 运行单 Sample 串行、Sample 内部 QA 并发
-    main(qa_max_workers=16, total_run=1)
 
-    # 方式 2: 运行多 Sample 并发、Sample 内部 QA 亦并发（如需切换取消下一句注释即可）
-    # main_parallel(sample_max_workers=10, qa_max_workers=16)
+    main(qa_max_workers=16, total_run=1, output_file=result_file)
+
+
+    # main_parallel(sample_max_workers=10, qa_max_workers=16, output_file="./results/locomo_result.json")

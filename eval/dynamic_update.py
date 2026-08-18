@@ -1,3 +1,5 @@
+import os
+
 from utils import gpt_summarize, generate_id, get_timestamp, gpt_update_profile, gpt_generate_multi_summary
 
 class DynamicUpdate:
@@ -35,14 +37,43 @@ Continuous?""".format(
             {"role": "system", "content": "You are a conversation continuity detector. Return ONLY 'true' or 'false'."},
             {"role": "user", "content": prompt}
         ]
-        
-        response = self.client.chat_completion(
-            model="gpt-4o-mini",
-            messages=messages,
-            temperature=0.0,
-            max_tokens=10
-        )
-        
+
+        system_prompt = "You are a conversation continuity detector. Return ONLY 'true' or 'false'."
+        prefix = """Determine if these two conversation pages are continuous (true continuation without topic shift).
+Return ONLY "true" or "false".
+
+Previous Page:"""
+
+        fusionrag_list = [
+            f"""Previous Page:
+User: {previous_page.get("user_input", "")}
+Assistant: {previous_page.get("agent_response", "")}""",
+
+f"""Current Page:
+User: {current_page.get("user_input", "")}
+Assistant: {current_page.get("agent_response", "")}"""]
+        query_prompt = """
+        Continuous?"""
+
+        if os.environ.get("FUSIONRAG", "false").lower() == "true":
+            response = self.client.chat_completion_fusionrag(
+                model="gpt-4o-mini",
+                system_prompt=system_prompt,
+                fusionrag_cache_list=fusionrag_list,
+                query_prompt=query_prompt,
+                prefix=prefix,
+                temperature=0.0,
+                max_tokens=10
+
+            )
+        else:
+            response = self.client.chat_completion(
+                model="gpt-4o-mini",
+                messages=messages,
+                temperature=0.0,
+                max_tokens=10
+            )
+
         return response.strip().lower() == "true"
 
     def _generate_meta_info(self, last_page_meta, current_page):
@@ -78,13 +109,45 @@ Continuous?""".format(
     3. Output ONLY the updated summary (no explanations)"""},
             {"role": "user", "content": prompt}
         ]
+
+        fusionrag_prompt_list = [
+            f"""Previous Meta-summary: {last_page_meta if last_page_meta else "None"}
+        New Dialogue:
+        {current_conversation}"""]
+
+        system_prompt = """You are a conversation meta-summary updater. Your task is to:
+    1. Preserve relevant context from previous meta-summary
+    2. Integrate new information from current dialogue
+    3. Output ONLY the updated summary (no explanations)"""
+
+        prefix = """Update the conversation meta-summary by incorporating the new dialogue while maintaining continuity.
         
-        return self.client.chat_completion(
-            model="qwen3-8b",
-            messages=messages,
-            temperature=0.3,
-            max_tokens=100
-        ).strip()
+    Guidelines:
+    1. Start from the previous meta-summary (if exists)
+    2. Add/update information based on the new dialogue
+    3. Keep it concise (1-2 sentences max)
+    4. Maintain context coherence
+"""
+
+        query_prompt = "Updated Meta-summary:"
+
+        if os.environ.get("FUSIONRAG", "false").lower() == "true":
+            return self.client.chat_completion_fusionrag(
+                model="qwen3-8b",
+                system_prompt=system_prompt,
+                prefix=prefix,
+                fusionrag_cache_list=fusionrag_prompt_list,
+                query_prompt=query_prompt,
+                temperature=0.3,
+                max_tokens=100
+            ).strip()
+        else:
+            return self.client.chat_completion(
+                model="qwen3-8b",
+                messages=messages,
+                temperature=0.3,
+                max_tokens=100
+            ).strip()
 
     def _update_connected_pages(self, page_id, new_meta_info):
         connected_pages = []

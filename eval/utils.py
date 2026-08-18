@@ -4,6 +4,10 @@ import openai
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from openai import OpenAI
+from sglang_kvcache import run_one_question_sglang
+from FusionRAG.run_question import FusionRAGModel
+import os
+
 gpt_client = OpenAI(
         api_key='sk-11ce7640e46049a6977c0d96ba855ffb',
     # base_url='https://dashscope.aliyuncs.com/compatible-mode/v1'
@@ -16,7 +20,14 @@ def generate_id(prefix="id"):
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
 
 def get_embedding(text, model_name="all-MiniLM-L6-v2"):
+    model_name_ = "/mnt/qjhs-sh-lab-01/models/all-MiniLM-L6-v2"
+    if os.path.exists(model_name_):
+        model_name = model_name_
     model = SentenceTransformer(model_name)
+    embedding = model.encode([text], convert_to_numpy=True)[0]
+    return embedding
+
+def get_embedding_with_model(text, model):
     embedding = model.encode([text], convert_to_numpy=True)[0]
     return embedding
 
@@ -28,11 +39,30 @@ def normalize_vector(vec):
     return vec / norm
 
 class OpenAIClient:
-    def __init__(self, api_key, base_url):
+    def __init__(self, api_key, base_url, recomputation_rate: float, sglang_url_prefiller: str, sglang_url: str):
         self.api_key = api_key
         self.base_url = base_url
         openai.api_key = self.api_key
         openai.api_base = self.base_url
+        self.sglang_url_prefiller = sglang_url_prefiller
+        self.sglang_url = sglang_url
+        self.recomputation_rate = recomputation_rate
+        draft_model_path = os.environ.get("DRAFT_MODEL_PATH", "")
+        if draft_model_path == "":
+            draft_model_path = "/mnt/data/models/Qwen2.5-7B-Instruct"
+        self.fusion_rag_model = FusionRAGModel(
+            model_path='',
+            use_multi_gpu=True,
+            model_type="qwen3",
+            model_name="Qwen3-32B",
+            draft_model_type="qwen",
+            draft_model_name="qwen2.5-3b",
+            preprocess_model_path="/data2/qy_tmp/xumengyao/bge-m3",
+            draft_model_path=draft_model_path,
+            draft_model_url="http://127.0.0.1:30005/v1/completions",
+            apikey="xxx",
+            use_local_draft_model=False,
+        )
 
     def chat_completion(self, model, messages, temperature=0.7, max_tokens=2000):
         model = "qwen3-8b"
@@ -52,8 +82,77 @@ class OpenAIClient:
         content = response.choices[0].message.content.strip()
         return content
 
+    def chat_completion_with_usage(self, model, messages, temperature=0.7, max_tokens=2000):
+        model = "qwen3-8b"
+        print("调用 GPT 接口，模型:", model)
+        response = gpt_client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            # extra_body={"enable_thinking":False}
+            extra_body={
+                "chat_template_kwargs": {
+                    "enable_thinking": False
+                }
+            }
+        )
+        content = response.choices[0].message.content.strip()
+        return content, response.usage
+
+    def chat_completion_fusionrag(self, model, system_prompt: str, prefix: str, fusionrag_cache_list: list[str], query_prompt: str, temperature=0.7, max_tokens=2000):
+        model = "qwen3-8b"
+        template = {
+            "DEFAULT_SYSTEM_PROMPT": f"""<|im_start|>system\n{system_prompt}\n{prefix}""",
+            "USER_PROMPT": f"""<|im_end|>\n<|im_start|>user\n\nQuestion: /no_think {query_prompt}<|im_end|>\n<|im_start|>assistant</think>\nAnswer: """
+        }
+        print("调用 fusionrag GPT 接口，模型:", model)
+
+        recompute_tokens, recompute_tokens_list, retrieved_docs, recompute_rate, sorted_doc_index, sorted_doc_index_before = self.fusion_rag_model.draft_one_question(
+            template["DEFAULT_SYSTEM_PROMPT"],  ## DEFAULT_SYSTEM_PROMPT
+            fusionrag_cache_list,
+            template["USER_PROMPT"],
+            self.recomputation_rate,
+            "",
+            False,
+            False,
+            [],
+            False,
+            False,  ## if do preprocess
+            False,
+            True
+        )
+
+        content, usage, top_logprobs, real_recomputation_rate = run_one_question_sglang(
+            DEFAULT_SYSTEM_PROMPT=template["DEFAULT_SYSTEM_PROMPT"],
+            USER_PROMPT=template["USER_PROMPT"],
+            MODEL=model,
+            retrived_docs=fusionrag_cache_list,
+            max_tokens=max_tokens,  ## max tokens.
+            retrived_docs_relevant_docs=[],
+            recompute_tokens=recompute_tokens,
+            recompute_tokens_list=recompute_tokens_list,
+            max_workers=1,  ## max_workers.
+            recomputation_rate=self.recomputation_rate,
+            model_use=model,
+            endpoint_url=self.sglang_url,
+            prefiller_endpoint_url=self.sglang_url_prefiller,
+            method_keyword="",
+        )
+
+        return content.strip()
+
 def gpt_generate_answer(prompt, messages, client):
     return client.chat_completion(model="qwen3-8b", messages=messages, temperature=0.7, max_tokens=2000)
+
+def gpt_generate_answer_fusionrag(system_prompt: str, prefix: str, fusionrag_cache_list: list[str], query_prompt: str, client):
+    return client.chat_completion_fusionrag(model="qwen3-8b",
+                                            system_prompt=system_prompt,
+                                            prefix=prefix,
+                                            fusionrag_cache_list=fusionrag_cache_list,
+                                            query_prompt=query_prompt,
+                                            temperature=0.7,
+                                            max_tokens=2000)
 
 def analyze_assistant_knowledge(dialogs, client):
     """
@@ -62,7 +161,7 @@ def analyze_assistant_knowledge(dialogs, client):
     """
     conversation = "\n".join([f"User: {d['user_input']}\nAI: {d['agent_response']}\nTime:{d['timestamp']}\n" for d in dialogs])
 
-    prompt = """
+    prefix = """
 # Assistant Knowledge Extraction Task
 Analyze the conversation and extract any fact or identity traits about the assistant. 
 If no traits can be extracted, reply with "None". Use the following format for output:
@@ -91,7 +190,8 @@ Few-shot examples:
    - None
 
 Conversation:
-""" + conversation
+"""
+    prompt = prefix + conversation
 
     messages = [
         {
@@ -104,8 +204,20 @@ Conversation:
         {"role": "user", "content": prompt}
     ]
 
+    system_prompt = """You are an assistant knowledge extraction engine. Rules:
+1. Extract ONLY explicit statements about the assistant's identity or knowledge.
+2. Use concise and factual statements in the first person.
+3. If no relevant information is found, output "None"."""
+
+    fusionrag_cache_list = [f"User: {d['user_input']}\nAI: {d['agent_response']}\nTime:{d['timestamp']}\n" for d in dialogs]
+
+    query_prompt = "Analyze the conversation and extract any fact or identity traits about the assistant."
+
     print("Analyzing assistant knowledge...")
-    result = gpt_generate_answer(prompt, messages, client)
+    if os.environ.get("FUSIONRAG", "false").lower() == "true":
+        result = gpt_generate_answer_fusionrag(system_prompt=system_prompt, prefix=prefix, fusionrag_cache_list=fusionrag_cache_list, query_prompt=query_prompt, client=client)
+    else:
+        result = gpt_generate_answer(prompt, messages, client)
     
     # Parse output
     assistant_knowledge = result.replace("【Assistant Knowledge】", "").strip()
@@ -142,8 +254,25 @@ def gpt_generate_multi_summary(text, client):
         {"role": "system", "content": "You are an expert in analyzing dialogue topics. No more than two topics."},
         {"role": "user", "content": prompt}
     ]
+    system_prompt = "You are an expert in analyzing dialogue topics. No more than two topics."
+    query_prompt = ("Please analyze the following dialogue and generate multiple subtopic summaries (if applicable), with a maximum of two themes.\n"
+              "Each summary should include the subtopic name, keywords (separated by commas), and the summary text, formatted as a JSON array, with an example format as follows:\n"
+              "[\n  {\"theme\": \"Business trip\", \"keywords\": [\"Business trip\", \"Itinerary\", \"Work\"], \"content\": \" User mentioned the troubles related to business trips.\"},\n  {\"theme\": \"Health\", \"keywords\": [\"Cold\", \"Uncomfortable\", \"Sick\"], \"content\": \"User reported feeling unwell due to a cold.\"}\n]\n"
+              "Please directly output the JSON array, without adding any other content.\n\Conversation content:\n")
+    fusionrag_prompt_list = [text]
+    prefix = " "
     print("调用 GPT 生成多子主题摘要...")
-    response_text = gpt_generate_answer(prompt, messages, client)
+
+    ##mengyao_debug fusionrag_bad_case
+    if os.environ.get("FUSIONRAG", "false").lower() == "true":
+        response_text = gpt_generate_answer_fusionrag(client=client,
+                                                      system_prompt=system_prompt,
+                                                      fusionrag_cache_list=fusionrag_prompt_list,
+                                                      prefix=prefix,
+                                                      query_prompt=query_prompt
+                                                      )
+    else:
+        response_text = gpt_generate_answer(prompt, messages, client)
     import json
     try:
         summaries = json.loads(response_text)
@@ -251,8 +380,9 @@ def gpt_personality_analysis(dialogs, client):
     Returns: {"profile": str, "user_data": str, "assistant_knowledge": str}
     """
     conversation = "\n".join([f"User: {d['user_input']}\nAssistant: {d['agent_response']}\nTime:{d['timestamp']}" for d in dialogs])
+    fusionrag_cache_list = [f"User: {d['user_input']}\nAssistant: {d['agent_response']}\nTime:{d['timestamp']}" for d in dialogs]
 
-    prompt = """
+    prefix = """
 # Personality and User Data Analysis Task
 Analyze the conversation and output in EXACTLY this format:
 
@@ -279,21 +409,31 @@ Analyze the conversation and output in EXACTLY this format:
 - (Include events, dates, locations, preferences, or other general or private information explicitly mentioned in the conversation. If none, write "None.")
 
 Conversation:
-""" + conversation
-    messages = [
-        {
-            "role": "system",
-            "content": """You are a personality and user data analysis engine. Rules:
+"""
+    prompt = prefix + conversation
+    system_prompt = """You are a personality and user data analysis engine. Rules:
 1. Extract ONLY observable traits and data with direct evidence.
 2. Include general user data such as events, dates, locations, and preferences.
 3. Use concise and factual statements.
 4. If no relevant information is found, output "None"."""
+
+    query_prompt = "Analyze the conversation and output in EXACTLY the format before."
+
+    messages = [
+        {
+            "role": "system",
+            "content": system_prompt
         },
         {"role": "user", "content": prompt}
     ]
 
     print("Running personality and user data analysis...")
-    result = gpt_generate_answer(prompt, messages, client)
+    if os.environ.get("FUSIONRAG", "false").lower() == "true":
+        result = gpt_generate_answer_fusionrag(system_prompt=system_prompt, prefix=prefix,
+                                      fusionrag_cache_list=fusionrag_cache_list, query_prompt=query_prompt,
+                                      client=client)
+    else:
+        result = gpt_generate_answer(prompt, messages, client)
     
     # Parse output
     profile, user_data = result.split("【User Data】") if "【User Data】" in result else (result, "None")
@@ -316,20 +456,14 @@ def gpt_update_profile(old_profile, new_analysis, client):
     Returns:
         Merged profile text with conflict resolution
     """
-    prompt = f"""
-# Profile Merge Task
+    prefix = """
+    # Profile Merge Task
 Consolidate these profiles while:
 - Preserving all valid observations
 - Resolving conflicts
 - Adding new dimensions
-
-## Current Profile
-{old_profile}
-
-## New Data
-{new_analysis}
-
-## Rules
+"""
+    query_prompt = """## Rules
 1. Keep ALL verified traits from both
 2. Resolve conflicts by:
    a) New explicit evidence > old assumptions
@@ -339,24 +473,51 @@ Consolidate these profiles while:
 
 Output ONLY the merged profile (no commentary):
 The generated content should not exceed 1500 words
+    """
+
+
+    prompt = f"""{prefix}
+
+## Current Profile
+{old_profile}
+
+## New Data
+{new_analysis}
+
+{query_prompt}
 """
 
-    messages = [
-        {
-            "role": "system",
-            "content": """You are a profile integration system. Your rules:
+    fusionrag_cache_list = [
+        f"""## Current Profile
+{old_profile}""",
+        f"""## New Data
+{new_analysis}"""
+    ]
+    
+
+    system_prompt = """You are a profile integration system. Your rules:
 1. NEVER discard verified information
 2. Conflict resolution hierarchy:
    Explicit statement > Implied trait > Assumption
 3. Add timestamps when traits change:
    (Updated: [date]) for modified traits
 4. Preserve the 4-category structure"""
+    messages = [
+        {
+            "role": "system",
+            "content": system_prompt
         },
         {"role": "user", "content": prompt}
     ]
 
     print("Updating user profile dynamically...")
-    return gpt_generate_answer(prompt, messages, client)
+
+    if os.environ.get("FUSIONRAG", "false").lower() == "true":
+        return gpt_generate_answer_fusionrag(system_prompt=system_prompt, prefix=prefix,
+                                             fusionrag_cache_list=fusionrag_cache_list, query_prompt=query_prompt,
+                                             client=client)
+    else:
+        return gpt_generate_answer(prompt, messages, client)
 
 def gpt_extract_theme(answer_text, client):
     prompt = f"请从以下回答中提取主题总结，并以【主题提取】：开头输出：\n{answer_text}\n"
@@ -364,8 +525,17 @@ def gpt_extract_theme(answer_text, client):
         {"role": "system", "content": "You are an expert in extracting conversation topics."},
         {"role": "user", "content": prompt}
     ]
+    system_prompt = "You are an expert in extracting conversation topics."
+    prefix = "请从以下回答中提取主题总结，并以【主题提取】：开头输出：\n"
+    fusionrag_cache_list = [answer_text]
+    query_prompt = "主题"
     print("调用 GPT 提取主题总结...")
-    return gpt_generate_answer(prompt, messages, client)
+    if os.environ.get("FUSIONRAG", "false").lower() == "true":
+        return gpt_generate_answer_fusionrag(system_prompt=system_prompt, prefix=prefix,
+                                             fusionrag_cache_list=fusionrag_cache_list, query_prompt=query_prompt,
+                                             client=client)
+    else:
+        return gpt_generate_answer(prompt, messages, client)
 
 def llm_extract_keywords(text, client):
     prompt = "Please extract the keywords of the conversation topic from the following dialogue, separated by commas, and do not exceed three:\n" + text
@@ -373,8 +543,16 @@ def llm_extract_keywords(text, client):
         {"role": "system", "content": "You are a keyword extraction expert. Please extract the keywords of the conversation topic."},
         {"role": "user", "content": prompt}
     ]
+    system_prompt = "You are a keyword extraction expert. Please extract the keywords of the conversation topic."
+    prefix = "Please extract the keywords of the conversation topic from the following dialogue, separated by commas, and do not exceed three:\n"
+    fusionrag_cache_list = [text]
+    query_prompt = "keywords: "
     print("调用 GPT 提取关键词...")
-    keywords_text =gpt_generate_answer(prompt, messages, client)
+    if os.environ.get("FUSIONRAG", "false").lower() == "true":
+        keywords_text = gpt_generate_answer_fusionrag(system_prompt=system_prompt, prefix=prefix,
+                                                      fusionrag_cache_list=fusionrag_cache_list, query_prompt=query_prompt, client=client)
+    else:
+        keywords_text =gpt_generate_answer(prompt, messages, client)
     keywords = [w.strip() for w in keywords_text.split(",") if w.strip()]
     return set(keywords)
 

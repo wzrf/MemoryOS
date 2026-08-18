@@ -1,6 +1,6 @@
 import json
 import numpy as np
-from utils import get_timestamp, get_embedding, normalize_vector
+from utils import get_timestamp, get_embedding, normalize_vector, get_embedding_with_model
 
 class LongTermMemory:
     def __init__(self, file_path="long_term.json"):
@@ -83,10 +83,10 @@ class LongTermMemory:
     def get_knowledge(self):
         return self.knowledge_base
 
-    def search_knowledge(self, query, threshold=0.1, top_k=10):
+    def search_knowledge(self, query, embedding_model, threshold=0.1, top_k=10):
         if not self.knowledge_base:
             return []
-        query_vec = get_embedding(query)
+        query_vec = get_embedding_with_model(query, model=embedding_model)
         query_vec = normalize_vector(query_vec)
         embeddings = []
         for entry in self.knowledge_base:
