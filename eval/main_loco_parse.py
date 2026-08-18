@@ -243,9 +243,10 @@ def process_single_qa_worker(
         max_capacity=5, file_path=short_mem_path
     )
     local_mid_mem = MidTermMemory(
-        max_capacity=2000, file_path=mid_mem_path
+        max_capacity=2000, file_path=mid_mem_path,
+        embedding_model=embedding_model
     )
-    local_long_mem = LongTermMemory(file_path=long_mem_path)
+    local_long_mem = LongTermMemory(file_path=long_mem_path, embedding_model=embedding_model)
 
     local_dynamic_updater = DynamicUpdate(
         local_short_mem,
@@ -377,7 +378,7 @@ def process_qa_in_parallel(
     return [res for _, res in qa_results_indexed]
 
 
-def process_single_sample(sample, client, qa_max_workers=5):
+def process_single_sample(sample, client, embedding_model, qa_max_workers=5):
     """单个样本的完整处理逻辑（提供给 main_parallel 调用）：
 
     1. 顺序构建/更新该 sample 的记忆
@@ -403,9 +404,11 @@ def process_single_sample(sample, client, qa_max_workers=5):
     mid_mem = MidTermMemory(
         max_capacity=2000,
         file_path=f"{mem_dir}/{sample_id}_mid_term.json",
+        embedding_model=embedding_model
     )
     long_mem = LongTermMemory(
-        file_path=f"{mem_dir}/{sample_id}_long_term.json"
+        file_path=f"{mem_dir}/{sample_id}_long_term.json",
+        embedding_model=embedding_model
     )
     dynamic_updater = DynamicUpdate(
         short_mem,
@@ -415,12 +418,11 @@ def process_single_sample(sample, client, qa_max_workers=5):
         client=client,
     )
 
-    if not skip_build:
-        for dialog in processed_dialogs:
-            short_mem.add_qa_pair(dialog)
-            if short_mem.is_full():
-                dynamic_updater.bulk_evict_and_update_mid_term()
-            update_user_profile_from_top_segment(mid_mem, long_mem, sample_id, client)
+    for dialog in processed_dialogs:
+        short_mem.add_qa_pair(dialog)
+        if short_mem.is_full():
+            dynamic_updater.bulk_evict_and_update_mid_term()
+        update_user_profile_from_top_segment(mid_mem, long_mem, sample_id, client)
 
     # 2. 过滤并并发处理 QA 对
     filtered_qa_pairs = filter_qa(qa_pairs)
@@ -439,111 +441,6 @@ def process_single_sample(sample, client, qa_max_workers=5):
         f"样本 {sample_id} 处理完成，共并发完成 {len(sample_results)} 个 QA 对"
     )
     return sample_results
-
-
-def main(qa_max_workers=5, total_run=10, output_file=""):
-    """单样本串行，但每个 Sample 内部的 QA 问答对并发处理"""
-    print("开始运行 [main]: 串行样本，并发 QA 模式...")
-
-    os.makedirs(mem_dir, exist_ok=True)
-
-    try:
-        with open("locomo10.json", "r", encoding="utf-8") as f:
-            dataset = json.load(f)
-        print(f"成功加载数据集，共 {len(dataset)} 个样本")
-    except FileNotFoundError:
-        print("错误：找不到 locomo10.json 文件，请确保文件在当前目录中")
-        return
-    except Exception as e:
-        print(f"加载数据集时出错：{e}")
-        return
-
-    results = []
-    dataset = dataset[:total_run]
-    total_samples = len(dataset)
-
-    for idx, sample in enumerate(dataset):
-        sample_id = sample.get("sample_id", "unknown_sample")
-        print(f"正在处理样本 {idx + 1}/{total_samples}: {sample_id}")
-
-        conversation_data = sample.get("conversation", {})
-        qa_pairs = sample.get("qa", [])
-
-        processed_dialogs = process_conversation(conversation_data)
-        if not processed_dialogs:
-            print(f"样本 {sample_id} 没有有效的对话数据，跳过")
-            continue
-
-        speaker_a = conversation_data.get("speaker_a")
-        speaker_b = conversation_data.get("speaker_b")
-
-        # 1. 顺序构建记忆，落盘存储
-        short_mem = ShortTermMemory(
-            max_capacity=5,
-            file_path=f"{mem_dir}/{sample_id}_short_term.json",
-        )
-        mid_mem = MidTermMemory(
-            max_capacity=2000,
-            file_path=f"{mem_dir}/{sample_id}_mid_term.json",
-        )
-        long_mem = LongTermMemory(
-            file_path=f"{mem_dir}/{sample_id}_long_term.json"
-        )
-        dynamic_updater = DynamicUpdate(
-            short_mem,
-            mid_mem,
-            long_mem,
-            topic_similarity_threshold=0.6,
-            client=client,
-        )
-
-        if len(short_mem.memory) > 0:
-            start_sign = short_mem.memory[-1]
-            for start_idx, dialog in enumerate(processed_dialogs):
-                if dialog == start_sign:
-                    processed_dialogs = processed_dialogs[start_idx+1:]
-                    break
-
-
-        if not skip_build:
-            for dialog_idx, dialog in enumerate(processed_dialogs):
-                short_mem.add_qa_pair(dialog)
-                if short_mem.is_full():
-                    dynamic_updater.bulk_evict_and_update_mid_term()
-                update_user_profile_from_top_segment(
-                    mid_mem, long_mem, sample_id, client
-                )
-                print(f"finish dialog_idx={dialog_idx}")
-                print("="*50)
-
-        # 2. 过滤 QA 并针对当前 Sample 开启多线程并发处理 QA
-        filtered_qa_pairs = filter_qa(qa_pairs)
-        if filtered_qa_pairs:
-            sample_results = process_qa_in_parallel(
-                filtered_qa_pairs,
-                sample_id,
-                speaker_a,
-                speaker_b,
-                client,
-                qa_max_workers=qa_max_workers,
-            )
-            results.extend(sample_results)
-
-        # 每处理完一个样本即保存一次文件
-        try:
-            with open(output_file, "w", encoding="utf-8") as f:
-                json.dump(results, f, ensure_ascii=False, indent=2)
-            print(f"样本 {idx + 1} 处理完成，结果已实时保存到 {output_file}")
-        except Exception as e:
-            print(f"保存结果时出错：{e}")
-
-    # 最终保存
-    try:
-        with open(output_file, "w", encoding="utf-8") as f:
-            json.dump(results, f, ensure_ascii=False, indent=2)
-        print(f"[main] 运行完成，全量结果写入 {output_file}")
-    except Exception as e:
-        print(f"最终保存结果时出错：{e}")
 
 
 def main_parallel(sample_max_workers=5, qa_max_workers=5, output_file=""):
@@ -569,11 +466,19 @@ def main_parallel(sample_max_workers=5, qa_max_workers=5, output_file=""):
     completed_samples = 0
     total_samples = len(dataset)
 
+    from sentence_transformers import SentenceTransformer
+    model_path = "/mnt/qjhs-sh-lab-01/models/all-MiniLM-L6-v2"
+    if not os.path.exists(model_path):
+        model_path = "all-MiniLM-L6-v2"
+    embedding_models = []
+    for _ in range(sample_max_workers):
+        embedding_models.append(SentenceTransformer(model_path))
+
     # 样本级 ThreadPoolExecutor 并发处理
     with ThreadPoolExecutor(max_workers=sample_max_workers) as executor:
         future_to_sample_id = {
             executor.submit(
-                process_single_sample, sample, client, qa_max_workers
+                process_single_sample, sample, client, embedding_models[idx % sample_max_workers], qa_max_workers
             ): sample.get("sample_id", f"sample_{idx+1}")
             for idx, sample in enumerate(dataset)
         }
@@ -615,9 +520,8 @@ if __name__ == "__main__":
     if fusionrag_tag == "true":
         mem_dir = "mem_tmp_loco_fusionrag"
         result_file = "./results/locomo_result_fusionrag.json"
-    skip_build = False
 
-    main(qa_max_workers=16, total_run=1, output_file=result_file)
+    # main(qa_max_workers=16, total_run=1, output_file=result_file)
 
 
-    # main_parallel(sample_max_workers=10, qa_max_workers=16, output_file="./results/locomo_result.json")
+    main_parallel(sample_max_workers=10, qa_max_workers=16, output_file="./results/locomo_result.json")

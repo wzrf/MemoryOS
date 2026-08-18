@@ -71,6 +71,7 @@ def build_memory_for_sample(sample, embedding_model):
     sample_id = sample.get("question_id", "unknown_id")
     sessions = sample.get("haystack_sessions", [])
     dates = sample.get("haystack_dates", [])
+    print(f"len(sessions): {len(sessions)}, len(dates): {len(dates)}")
 
     short_mem_path = f"{MEM_DIR}/{sample_id}_short_term.json"
     mid_mem_path = f"{MEM_DIR}/{sample_id}_mid_term.json"
@@ -83,24 +84,25 @@ def build_memory_for_sample(sample, embedding_model):
         short_mem, mid_mem, long_mem, topic_similarity_threshold=0.6, client=client
     )
 
-    if len(short_mem.memory) > 0:
-        start_sign = short_mem.memory[-1]
-        for start_idx, dialog in enumerate(sessions):
-            if dialog["agent_response"] == start_sign["agent_response"] and dialog["user_input"] == start_sign["user_input"] and dialog["timestamp"] == start_sign["timestamp"]:
-                sessions = sessions[start_idx + 1:]
-                break
-
-    # 1. 直接单线程顺序解析各 Session，天然保证时间/对话顺序
+    dialogs = []
     for idx, msgs in enumerate(sessions):
         s_date = dates[idx] if idx < len(dates) else ""
-        dialogs = parse_session_dialogs(msgs, s_date)
+        dialogs.extend(parse_session_dialogs(msgs, s_date))
+
+    if len(short_mem.memory) > 0:
+        start_sign = short_mem.memory[-1]
+        for start_idx, dialog in enumerate(dialogs):
+            if dialog["agent_response"] == start_sign["agent_response"] and dialog["user_input"] == start_sign["user_input"] and dialog["timestamp"] == start_sign["timestamp"]:
+                dialogs = dialogs[start_idx + 1:]
+                break
+
 
         # 2. 依次写入记忆系统
-        for dialog in dialogs:
-            short_mem.add_qa_pair(dialog)
-            if short_mem.is_full():
-                dynamic_updater.bulk_evict_and_update_mid_term()
-            update_user_profile_from_top_segment(mid_mem, long_mem, sample_id, client)
+    for dialog in dialogs:
+        short_mem.add_qa_pair(dialog)
+        if short_mem.is_full():
+            dynamic_updater.bulk_evict_and_update_mid_term()
+        update_user_profile_from_top_segment(mid_mem, long_mem, sample_id, client)
 
     return short_mem, mid_mem, long_mem, dynamic_updater
 
@@ -309,7 +311,7 @@ def main_parallel_longmemeval(
 if __name__ == "__main__":
     MEM_DIR = "mem_tmp_longmemeval"
     main_parallel_longmemeval(
-        data_path="data/longmemeval_s_short.json",
+        data_path="data/longmemeval_mixed.json",
         output_file="./results/longmemeval_result.json",
-        sample_max_workers=8,  # 同时并发处理 8 个 Sample
+        sample_max_workers=16,  # 同时并发处理 8 个 Sample
     )
