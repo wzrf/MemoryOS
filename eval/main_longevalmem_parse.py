@@ -89,11 +89,13 @@ def build_memory_for_sample(sample, embedding_model):
         s_date = dates[idx] if idx < len(dates) else ""
         dialogs.extend(parse_session_dialogs(msgs, s_date))
 
+    save_token_consumption = True
     if len(short_mem.memory) > 0:
         start_sign = short_mem.memory[-1]
         for start_idx, dialog in enumerate(dialogs):
             if dialog["agent_response"] == start_sign["agent_response"] and dialog["user_input"] == start_sign["user_input"] and dialog["timestamp"] == start_sign["timestamp"]:
                 dialogs = dialogs[start_idx + 1:]
+                save_token_consumption = False ##mengyao_debug 如果是从一半开始build/跳过build 就不写入了
                 break
 
 
@@ -102,7 +104,12 @@ def build_memory_for_sample(sample, embedding_model):
         short_mem.add_qa_pair(dialog)
         if short_mem.is_full():
             dynamic_updater.bulk_evict_and_update_mid_term()
-        update_user_profile_from_top_segment(mid_mem, long_mem, sample_id, client)
+        update_user_profile_from_top_segment(mid_mem, long_mem, sample_id, client, dynamic_updater)
+        dynamic_updater.get_stats()
+
+    if save_token_consumption:
+        with open(f"./token_consumption/longmemeval_{sample_id}.json", "w") as f:
+            json.dump(dynamic_updater.get_stats(), f)
 
     return short_mem, mid_mem, long_mem, dynamic_updater
 
@@ -146,10 +153,10 @@ def generate_system_response_longmemeval(query, query_date, short_mem, long_mem,
         {"role": "user", "content": user_prompt}
     ]
 
-    response, usage = client_inst.chat_completion_with_usage(
+    response, prompt_tokens, completion_tokens = client_inst.chat_completion_with_usage(
         model="qwen3-8b", messages=messages, temperature=0.7, max_tokens=2000
     )
-    return response, system_prompt, user_prompt, usage.prompt_tokens, usage.completion_tokens
+    return response, system_prompt, user_prompt, prompt_tokens, completion_tokens
 
 
 def answer_single_sample(sample, embedding_model=None):
@@ -308,10 +315,14 @@ def main_parallel_longmemeval(
     print(f"\n🎉 处理完毕！共计完成 {len(results)}/{total_samples} 条数据，结果已保存至 {output_file}")
 
 
+##mengyao_debug LLM配置： 搜索 http://127.0.0.1:30004 即可
 if __name__ == "__main__":
+    MAX_WORKERS = 32
+    if os.environ.get("DEBUG") == "1":
+        MAX_WORKERS = 1
     MEM_DIR = "mem_tmp_longmemeval"
     main_parallel_longmemeval(
         data_path="data/longmemeval_mixed.json",
         output_file="./results/longmemeval_result.json",
-        sample_max_workers=16,  # 同时并发处理 8 个 Sample
+        sample_max_workers=MAX_WORKERS,  # 同时并发处理 8 个 Sample
     )

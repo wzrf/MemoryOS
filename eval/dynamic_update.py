@@ -10,6 +10,14 @@ class DynamicUpdate:
         self.topic_similarity_threshold = topic_similarity_threshold
         self.client = client
         self.last_evicted_page = None
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+
+    def get_stats(self):
+        return {
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+        }
 
     def _is_conversation_continuing(self, previous_page, current_page):
         if not previous_page:
@@ -56,7 +64,7 @@ Assistant: {current_page.get("agent_response", "")}"""]
         Continuous?"""
 
         if os.environ.get("FUSIONRAG", "false").lower() == "true":
-            response = self.client.chat_completion_fusionrag(
+            response, prompt_tokens, completion_tokens = self.client.chat_completion_fusionrag(
                 model="gpt-4o-mini",
                 system_prompt=system_prompt,
                 fusionrag_cache_list=fusionrag_list,
@@ -67,12 +75,14 @@ Assistant: {current_page.get("agent_response", "")}"""]
 
             )
         else:
-            response = self.client.chat_completion(
+            response, prompt_tokens, completion_tokens = self.client.chat_completion_with_usage(
                 model="gpt-4o-mini",
                 messages=messages,
                 temperature=0.0,
                 max_tokens=10
             )
+        self.prompt_tokens += prompt_tokens
+        self.completion_tokens += completion_tokens
 
         return response.strip().lower() == "true"
 
@@ -132,7 +142,7 @@ Assistant: {current_page.get("agent_response", "")}"""]
         query_prompt = "Updated Meta-summary:"
 
         if os.environ.get("FUSIONRAG", "false").lower() == "true":
-            return self.client.chat_completion_fusionrag(
+            content, prompt_tokens, completion_tokens = self.client.chat_completion_fusionrag(
                 model="qwen3-8b",
                 system_prompt=system_prompt,
                 prefix=prefix,
@@ -140,14 +150,19 @@ Assistant: {current_page.get("agent_response", "")}"""]
                 query_prompt=query_prompt,
                 temperature=0.3,
                 max_tokens=100
-            ).strip()
+            )
         else:
-            return self.client.chat_completion(
+            content, prompt_tokens, completion_tokens = self.client.chat_completion_with_usage(
                 model="qwen3-8b",
                 messages=messages,
                 temperature=0.3,
                 max_tokens=100
-            ).strip()
+            )
+        self.prompt_tokens += prompt_tokens
+        self.completion_tokens += completion_tokens
+        return content
+
+
 
     def _update_connected_pages(self, page_id, new_meta_info):
         connected_pages = []
@@ -227,20 +242,24 @@ Assistant: {current_page.get("agent_response", "")}"""]
         # 3. 将所有用户输入拼接用于主题分析
         input_text = "\n".join([f"User: {page.get('user_input','')}\n" for page in pages])
         print("动态更新：调用 GPT 生成多子主题摘要...")
-        multi_summary = gpt_generate_multi_summary(input_text, self.client)
-        
+        multi_summary, prompt_tokens, completion_tokens = gpt_generate_multi_summary(input_text, self.client)
+        self.prompt_tokens += prompt_tokens
+        self.completion_tokens += completion_tokens
+
         # 4. 按主题分组插入中期记忆
         for summary_dict in multi_summary.get("summaries", []):
             sub_summary = summary_dict.get("content", "")
             sub_key_words = summary_dict.get("keywords", [])
             
             print(f"动态更新：处理子主题【{summary_dict.get('theme','')}】，插入中期记忆...")
-            self.mid_term_memory.insert_pages_into_session(
+            prompt_tokens, completion_tokens = self.mid_term_memory.insert_pages_into_session(
                 sub_summary, 
                 sub_key_words, 
                 pages,  # 传入已经处理好的完整pages
                 self.topic_similarity_threshold
             )
+            self.prompt_tokens += prompt_tokens
+            self.completion_tokens += completion_tokens
 
     def update_long_term(self, user_id, new_profile_data, knowledge_text):
         print("动态更新：更新长期记忆中的用户画像和私有数据...")

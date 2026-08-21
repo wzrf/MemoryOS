@@ -98,7 +98,7 @@ class OpenAIClient:
             }
         )
         content = response.choices[0].message.content.strip()
-        return content, response.usage
+        return content, response.usage.prompt_tokens, response.usage.completion_tokens
 
     def chat_completion_fusionrag(self, model, system_prompt: str, prefix: str, fusionrag_cache_list: list[str], query_prompt: str, temperature=0.7, max_tokens=2000):
         model = "qwen3-8b"
@@ -140,10 +140,10 @@ class OpenAIClient:
             method_keyword="",
         )
 
-        return content.strip()
+        return content.strip(), usage.prompt_tokens, usage.completion_tokens
 
 def gpt_generate_answer(prompt, messages, client):
-    return client.chat_completion(model="qwen3-8b", messages=messages, temperature=0.7, max_tokens=2000)
+    return client.chat_completion_with_usage(model="qwen3-8b", messages=messages, temperature=0.7, max_tokens=2000)
 
 def gpt_generate_answer_fusionrag(system_prompt: str, prefix: str, fusionrag_cache_list: list[str], query_prompt: str, client):
     return client.chat_completion_fusionrag(model="qwen3-8b",
@@ -215,13 +215,13 @@ Conversation:
 
     print("Analyzing assistant knowledge...")
     if os.environ.get("FUSIONRAG", "false").lower() == "true":
-        result = gpt_generate_answer_fusionrag(system_prompt=system_prompt, prefix=prefix, fusionrag_cache_list=fusionrag_cache_list, query_prompt=query_prompt, client=client)
+        result, prompt_tokens, completion_tokens = gpt_generate_answer_fusionrag(system_prompt=system_prompt, prefix=prefix, fusionrag_cache_list=fusionrag_cache_list, query_prompt=query_prompt, client=client)
     else:
-        result = gpt_generate_answer(prompt, messages, client)
+        result, prompt_tokens, completion_tokens = gpt_generate_answer(prompt, messages, client)
     
     # Parse output
     assistant_knowledge = result.replace("【Assistant Knowledge】", "").strip()
-    return {"assistant_knowledge": assistant_knowledge}
+    return {"assistant_knowledge": assistant_knowledge}, prompt_tokens, completion_tokens
 
 def gpt_summarize(dialogs, client):
     prompt = "Please generate a topic summary based on the following conversation：\n"
@@ -265,20 +265,20 @@ def gpt_generate_multi_summary(text, client):
 
     ##mengyao_debug fusionrag_bad_case
     if os.environ.get("FUSIONRAG", "false").lower() == "true":
-        response_text = gpt_generate_answer_fusionrag(client=client,
+        response_text, prompt_tokens, completion_tokens = gpt_generate_answer_fusionrag(client=client,
                                                       system_prompt=system_prompt,
                                                       fusionrag_cache_list=fusionrag_prompt_list,
                                                       prefix=prefix,
                                                       query_prompt=query_prompt
                                                       )
     else:
-        response_text = gpt_generate_answer(prompt, messages, client)
+        response_text, prompt_tokens, completion_tokens = gpt_generate_answer(prompt, messages, client)
     import json
     try:
         summaries = json.loads(response_text)
     except Exception:
         summaries = []
-    return {"input": text, "summaries": summaries}
+    return {"input": text, "summaries": summaries}, prompt_tokens, completion_tokens
 
 # def gpt_personality_analysis(dialogs, client):
 #     prompt = ("Please analyze the following conversation and extract the user profile information and user private data."
@@ -429,23 +429,23 @@ Conversation:
 
     print("Running personality and user data analysis...")
     if os.environ.get("FUSIONRAG", "false").lower() == "true":
-        result = gpt_generate_answer_fusionrag(system_prompt=system_prompt, prefix=prefix,
+        result, prompt_tokens, completion_tokens = gpt_generate_answer_fusionrag(system_prompt=system_prompt, prefix=prefix,
                                       fusionrag_cache_list=fusionrag_cache_list, query_prompt=query_prompt,
                                       client=client)
     else:
-        result = gpt_generate_answer(prompt, messages, client)
+        result, prompt_tokens, completion_tokens = gpt_generate_answer(prompt, messages, client)
     
     # Parse output
     profile, user_data = result.split("【User Data】") if "【User Data】" in result else (result, "None")
     
     # Analyze assistant knowledge
-    assistant_knowledge_result = analyze_assistant_knowledge(dialogs, client)
+    assistant_knowledge_result, prompt_tokens_1, completion_tokens_1 = analyze_assistant_knowledge(dialogs, client)
     
     return {
         "profile": profile.replace("【User Profile】", "").strip(),
         "private": user_data.strip(),
         "assistant_knowledge": assistant_knowledge_result["assistant_knowledge"]
-    }
+    }, prompt_tokens+prompt_tokens_1, completion_tokens+completion_tokens_1
 
 def gpt_update_profile(old_profile, new_analysis, client):
     """
@@ -549,12 +549,12 @@ def llm_extract_keywords(text, client):
     query_prompt = "keywords: "
     print("调用 GPT 提取关键词...")
     if os.environ.get("FUSIONRAG", "false").lower() == "true":
-        keywords_text = gpt_generate_answer_fusionrag(system_prompt=system_prompt, prefix=prefix,
+        keywords_text, prompt_tokens, completion_tokens = gpt_generate_answer_fusionrag(system_prompt=system_prompt, prefix=prefix,
                                                       fusionrag_cache_list=fusionrag_cache_list, query_prompt=query_prompt, client=client)
     else:
-        keywords_text =gpt_generate_answer(prompt, messages, client)
+        keywords_text, prompt_tokens, completion_tokens = gpt_generate_answer(prompt, messages, client)
     keywords = [w.strip() for w in keywords_text.split(",") if w.strip()]
-    return set(keywords)
+    return set(keywords), prompt_tokens, completion_tokens
 
 def compute_time_decay(session_timestamp, current_timestamp, tau=3600):
     from datetime import datetime

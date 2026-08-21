@@ -27,7 +27,7 @@ client = OpenAIClient(
 # Heat threshold
 H_THRESHOLD = 5.0
 
-def update_user_profile_from_top_segment(mid_mem, long_mem, sample_id, client):
+def update_user_profile_from_top_segment(mid_mem, long_mem, sample_id, client, dynamic_updater: DynamicUpdate):
     """
     Update user profile if heat exceeds threshold and extract assistant knowledge.
     """
@@ -49,17 +49,22 @@ def update_user_profile_from_top_segment(mid_mem, long_mem, sample_id, client):
             
             old_profile = long_mem.get_raw_user_profile(sample_id)
             
-            result = gpt_personality_analysis(un_analyzed, client)
+            result, prompt_tokens, completion_tokens = gpt_personality_analysis(un_analyzed, client)
             new_profile = result["profile"]
             new_private = result["private"]
             assistant_knowledge = result["assistant_knowledge"]
             
             if old_profile:
-                updated_profile = gpt_update_profile(old_profile, new_profile, client)
+                updated_profile, prompt_tokens_1, completion_tokens_1 = gpt_update_profile(old_profile, new_profile, client)
+                prompt_tokens += prompt_tokens_1
+                completion_tokens += completion_tokens_1
             else:
                 updated_profile = new_profile
                 
             long_mem.update_user_profile(sample_id, updated_profile)
+
+            dynamic_updater.prompt_tokens += prompt_tokens
+            dynamic_updater.completion_tokens += completion_tokens
             
             # 修改点：拆分 new_private 并逐个存储
             if new_private and new_private != "- None":
@@ -143,8 +148,8 @@ def generate_system_response_with_meta(query, short_mem, long_mem, retrieval_que
         {"role": "user", "content": user_prompt}
     ]
     
-    response, usage = client.chat_completion_with_usage(model="qwen3-8b", messages=messages, temperature=0.7, max_tokens=2000)
-    return response, system_prompt, user_prompt, usage.prompt_tokens, usage.completion_tokens
+    response, prompt_tokens, completion_tokens = client.chat_completion_with_usage(model="qwen3-8b", messages=messages, temperature=0.7, max_tokens=2000)
+    return response, system_prompt, user_prompt, prompt_tokens, completion_tokens
 
 def process_conversation(conversation_data):
     """
@@ -422,7 +427,11 @@ def process_single_sample(sample, client, embedding_model, qa_max_workers=5):
         short_mem.add_qa_pair(dialog)
         if short_mem.is_full():
             dynamic_updater.bulk_evict_and_update_mid_term()
-        update_user_profile_from_top_segment(mid_mem, long_mem, sample_id, client)
+        update_user_profile_from_top_segment(mid_mem, long_mem, sample_id, client, dynamic_updater)
+        dynamic_updater.get_stats()
+
+    with open(f"./token_consumption/locomo_{sample_id}.json", "w") as f:
+        json.dump(dynamic_updater.get_stats(), f)
 
     # 2. 过滤并并发处理 QA 对
     filtered_qa_pairs = filter_qa(qa_pairs)
@@ -521,7 +530,8 @@ if __name__ == "__main__":
         mem_dir = "mem_tmp_loco_fusionrag"
         result_file = "./results/locomo_result_fusionrag.json"
 
-    # main(qa_max_workers=16, total_run=1, output_file=result_file)
+    MAX_WORKERS = 10
+    if os.environ.get("DEBUG") == "1":
+        MAX_WORKERS = 1
 
-
-    main_parallel(sample_max_workers=10, qa_max_workers=16, output_file="./results/locomo_result.json")
+    main_parallel(sample_max_workers=MAX_WORKERS, qa_max_workers=16, output_file="./results/locomo_result.json")
