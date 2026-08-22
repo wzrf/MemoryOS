@@ -4,6 +4,7 @@ import re
 import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import argparse
 
 from short_term_memory import ShortTermMemory
 from mid_term_memory import MidTermMemory
@@ -320,9 +321,12 @@ if __name__ == "__main__":
     MAX_WORKERS = 32
     if os.environ.get("DEBUG") == "1":
         MAX_WORKERS = 1
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", type=str, default="none", help="dataset")
+    args = parser.parse_args()
     MEM_DIR = "mem_tmp_longmemeval"
     main_parallel_longmemeval(
-        data_path="data/longmemeval_mixed.json",
+        data_path=args.dataset, ##mengyao_debug
         output_file="./results/longmemeval_result.json",
         sample_max_workers=MAX_WORKERS,  # 同时并发处理 8 个 Sample
     )
