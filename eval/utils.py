@@ -7,6 +7,9 @@ from openai import OpenAI
 from sglang_kvcache import run_one_question_sglang
 from FusionRAG.run_question import FusionRAGModel
 import os
+import threading
+embedding_lock = threading.Lock()
+
 
 gpt_client = OpenAI(
         api_key='sk-11ce7640e46049a6977c0d96ba855ffb',
@@ -28,8 +31,9 @@ def get_embedding(text, model_name="all-MiniLM-L6-v2"):
     return embedding
 
 def get_embedding_with_model(text, model):
-    embedding = model.encode([text], convert_to_numpy=True)[0]
-    return embedding
+    with embedding_lock:
+        embedding = model.encode([text], convert_to_numpy=True)[0]
+        return embedding
 
 def normalize_vector(vec):
     vec = np.array(vec, dtype=np.float32)
