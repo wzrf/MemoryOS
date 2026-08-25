@@ -244,6 +244,132 @@ def process_eval_file(file_path: str, dataset_name: str):
         print("No metrics found.")
 
 
+def process_halumem_dir(dir_path: str):
+    """处理 results_memoryos_halumem 目录，统计每个问题类型的平均 token 消耗和指标"""
+    import json
+    from pathlib import Path
+    from collections import defaultdict
+    import numpy as np
+
+    dir_p = Path(dir_path)
+    if not dir_p.exists() or not dir_p.is_dir():
+        print(f"Error: Directory {dir_path} does not exist or is not a directory.")
+        return
+
+    json_files = list(dir_p.glob("*.json"))
+    if not json_files:
+        print(f"No JSON files found in {dir_path}")
+        return
+
+    # 按问题类型分组存储数据
+    groups = defaultdict(list)
+
+    for file in json_files:
+        try:
+            with open(file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            print(f"Error reading {file}: {e}")
+            continue
+
+        if not isinstance(data, list):
+            print(f"Error: Expected a JSON array in {file}")
+            continue
+
+        for item in data:
+            question_type = item.get("question_type", "unknown")
+
+            # 收集 token 相关字段
+            turn_build_memory_prompt_tokens = item.get("turn_build_memory_prompt_tokens", 0)
+            turn_build_memory_completion_tokens = item.get("turn_build_memory_completion_tokens", 0)
+            retrieval_prompt_tokens = item.get("retrieval_prompt_tokens", 0)
+            retrieval_completion_tokens = item.get("retrieval_completion_tokens", 0)
+            answer_prompt_tokens = item.get("answer_prompt_tokens", 0)
+            answer_completion_tokens = item.get("answer_completion_tokens", 0)
+
+            # 计算总和
+            retrieval_prompt_total = retrieval_prompt_tokens + answer_prompt_tokens
+            retrieval_completion_total = retrieval_completion_tokens + answer_completion_tokens
+
+            # 获取预测和参考文本
+            prediction = item.get("answer", "")
+            reference = item.get("reference", "")
+
+            # 计算指标
+            f1_score = item.get("metrics", {}).get("f1", 0.0)
+            correct = item.get("metrics", {}).get("correct", False)
+            correct_score = 1.0 if correct else 0.0
+
+            # 计算 BLEU 分数
+            bleu_scores = calculate_bleu_scores(prediction, reference)
+
+            groups[question_type].append({
+                "turn_build_memory_prompt_tokens": turn_build_memory_prompt_tokens,
+                "turn_build_memory_completion_tokens": turn_build_memory_completion_tokens,
+                "retrieval_prompt_total": retrieval_prompt_total,
+                "retrieval_completion_total": retrieval_completion_total,
+                "f1": f1_score,
+                "correct": correct_score,
+                "bleu1": bleu_scores.get("bleu1", 0.0),
+                "bleu2": bleu_scores.get("bleu2", 0.0),
+                "bleu3": bleu_scores.get("bleu3", 0.0),
+                "bleu4": bleu_scores.get("bleu4", 0.0),
+            })
+
+    if not groups:
+        print("No data found.")
+        return
+
+    print(f"\n================ [HALUMEM] Evaluation Summary ================")
+    print(f"Total files processed: {len(json_files)}")
+    print(f"Total question entries: {sum(len(items) for items in groups.values())}")
+
+    # 打印表头 - 添加 BLEU 1-4 列
+    header = f"{'Question Type':<25} | {'TBM Pr':>8} | {'TBM Comp':>8} | {'Ret+Ans Pr':>11} | {'Ret+Ans Comp':>13} | {'F1':>6} | {'Acc':>6} | {'BLEU-1':>7} | {'BLEU-2':>7} | {'BLEU-3':>7} | {'BLEU-4':>7} | {'Count':>6}"
+    print("\n" + "-" * len(header))
+    print(header)
+    print("-" * len(header))
+
+    # 计算每个组的平均值
+    for qtype in sorted(groups.keys()):
+        items = groups[qtype]
+        count = len(items)
+
+        avg_turn_build_prompt = np.mean([i["turn_build_memory_prompt_tokens"] for i in items])
+        avg_turn_build_completion = np.mean([i["turn_build_memory_completion_tokens"] for i in items])
+        avg_prompt_total = np.mean([i["retrieval_prompt_total"] for i in items])
+        avg_completion_total = np.mean([i["retrieval_completion_total"] for i in items])
+        avg_f1 = np.mean([i["f1"] for i in items])
+        avg_correct = np.mean([i["correct"] for i in items])
+        avg_bleu1 = np.mean([i["bleu1"] for i in items])
+        avg_bleu2 = np.mean([i["bleu2"] for i in items])
+        avg_bleu3 = np.mean([i["bleu3"] for i in items])
+        avg_bleu4 = np.mean([i["bleu4"] for i in items])
+
+        line = f"{qtype:<25} | {avg_turn_build_prompt:>8.0f} | {avg_turn_build_completion:>8.0f} | {avg_prompt_total:>11.0f} | {avg_completion_total:>13.0f} | {avg_f1:>6.4f} | {avg_correct:>6.4f} | {avg_bleu1:>7.4f} | {avg_bleu2:>7.4f} | {avg_bleu3:>7.4f} | {avg_bleu4:>7.4f} | {count:>6}"
+        print(line)
+
+    # 计算整体平均值
+    all_items = [item for sublist in groups.values() for item in sublist]
+    if all_items:
+        overall_turn_build_prompt = np.mean([i["turn_build_memory_prompt_tokens"] for i in all_items])
+        overall_turn_build_completion = np.mean([i["turn_build_memory_completion_tokens"] for i in all_items])
+        overall_prompt_total = np.mean([i["retrieval_prompt_total"] for i in all_items])
+        overall_completion_total = np.mean([i["retrieval_completion_total"] for i in all_items])
+        overall_f1 = np.mean([i["f1"] for i in all_items])
+        overall_correct = np.mean([i["correct"] for i in all_items])
+        overall_bleu1 = np.mean([i["bleu1"] for i in all_items])
+        overall_bleu2 = np.mean([i["bleu2"] for i in all_items])
+        overall_bleu3 = np.mean([i["bleu3"] for i in all_items])
+        overall_bleu4 = np.mean([i["bleu4"] for i in all_items])
+        total_count = len(all_items)
+
+        print("-" * len(header))
+        line = f"{'OVERALL (Total Avg)':<25} | {overall_turn_build_prompt:>8.0f} | {overall_turn_build_completion:>8.0f} | {overall_prompt_total:>11.0f} | {overall_completion_total:>13.0f} | {overall_f1:>6.4f} | {overall_correct:>6.4f} | {overall_bleu1:>7.4f} | {overall_bleu2:>7.4f} | {overall_bleu3:>7.4f} | {overall_bleu4:>7.4f} | {total_count:>6}"
+        print(line)
+        print("=" * len(header))
+
+
 if __name__ == "__main__":
     # 配置你的 JSON 数据文件路径
     tasks = [
@@ -253,3 +379,6 @@ if __name__ == "__main__":
 
     for file_path, name in tasks:
         process_eval_file(file_path, name)
+
+    # 处理 HALUMEM 结果目录
+    process_halumem_dir("./results_memoryos_halumem")
