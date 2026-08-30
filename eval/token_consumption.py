@@ -373,8 +373,8 @@ def process_halumem_dir(dir_path: str):
 if __name__ == "__main__":
     # 配置你的 JSON 数据文件路径
     tasks = [
-        ("./results/longmemeval_result.json", "longmemeval"),
-        ("./results/locomo_result.json", "locomo"),
+        # ("./results/longmemeval_result.json", "longmemeval"),
+        ("./results/locomo_result_fusionrag.json", "locomo"),
     ]
 
     for file_path, name in tasks:

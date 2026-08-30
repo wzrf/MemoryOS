@@ -26,6 +26,7 @@ client = OpenAIClient(
 )
 # Heat threshold
 H_THRESHOLD = 5.0
+all_memory_summarize_percentage = []
 
 def update_user_profile_from_top_segment(mid_mem, long_mem, sample_id, client, dynamic_updater: DynamicUpdate):
     """
@@ -394,6 +395,7 @@ def process_single_sample(sample, client, embedding_model, qa_max_workers=5):
     qa_pairs = sample.get("qa", [])
 
     processed_dialogs = process_conversation(conversation_data)
+    processed_dialogs_text = "".join([x["user_input"] + x["agent_response"] for x in processed_dialogs])
     if not processed_dialogs:
         print(f"样本 {sample_id} 没有有效的对话数据，跳过")
         return []
@@ -423,6 +425,15 @@ def process_single_sample(sample, client, embedding_model, qa_max_workers=5):
         client=client,
     )
 
+    save_token_consumption = True
+    if len(short_mem.memory) > 0:
+        start_sign = short_mem.memory[-1]
+        for start_idx, dialog in enumerate(processed_dialogs):
+            if dialog["agent_response"] == start_sign["agent_response"] and dialog["user_input"] == start_sign["user_input"] and dialog["timestamp"] == start_sign["timestamp"]:
+                processed_dialogs = processed_dialogs[start_idx + 1:]
+                save_token_consumption = False ##mengyao_debug 如果是从一半开始build/跳过build 就不写入了
+                break
+
     for dialog in processed_dialogs:
         short_mem.add_qa_pair(dialog)
         if short_mem.is_full():
@@ -430,8 +441,23 @@ def process_single_sample(sample, client, embedding_model, qa_max_workers=5):
         update_user_profile_from_top_segment(mid_mem, long_mem, sample_id, client, dynamic_updater)
         dynamic_updater.get_stats()
 
-    with open(f"./token_consumption/locomo_{sample_id}.json", "w") as f:
-        json.dump(dynamic_updater.get_stats(), f)
+    history_mid = " ".join([v["summary"] for k, v in mid_mem.sessions.items()])
+    history_long = " ".join([v["data"] for k, v in long_mem.user_profiles.items()])
+    all_summary = history_mid + history_long
+    all_history = processed_dialogs_text
+
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained("/mnt/qjhs-sh-lab-01/models/Qwen3-8B", trust_remote_code=True)
+    all_summary = tokenizer.encode(all_summary, add_special_tokens=True)
+    all_history = tokenizer.encode(all_history, add_special_tokens=True)
+    all_memory_summarize_percentage.append(len(all_summary)/len(all_history))
+
+    print(f"summarize percentage: {sum(all_memory_summarize_percentage)/len(all_memory_summarize_percentage)}")
+
+    if save_token_consumption:
+        with open(f"./token_consumption/locomo_{sample_id}.json", "w") as f:
+            json.dump(dynamic_updater.get_stats(), f)
+
 
     # 2. 过滤并并发处理 QA 对
     filtered_qa_pairs = filter_qa(qa_pairs)

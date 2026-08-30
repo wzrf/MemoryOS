@@ -142,6 +142,37 @@ class HaluMemMemoryOSTester:
                           save_dir: str = "./results_memoryos_halumem"):
         safe_sample_id = sample.sample_id.replace(" ", "_")
 
+        # 检查结果文件是否已存在且包含所有问题
+        result_file = os.path.join(save_dir, f"{safe_sample_id}.json")
+        if os.path.exists(result_file):
+            try:
+                with open(result_file, 'r', encoding='utf-8') as f:
+                    existing_results = json.load(f)
+
+                # 收集已存在的question_id
+                existing_question_ids = set()
+                for res in existing_results:
+                    if isinstance(res, dict) and 'question_id' in res:
+                        existing_question_ids.add(res['question_id'])
+
+                # 计算当前样本的所有question_id
+                expected_question_ids = set()
+                for s_idx, session in enumerate(sample.sessions):
+                    questions = session.get("questions", [])
+                    for q_idx, _ in enumerate(questions):
+                        question_id = f"{safe_sample_id}_s{s_idx}_q{q_idx}"
+                        expected_question_ids.add(question_id)
+
+                # 如果已存在的question_id包含所有预期问题，跳过处理
+                if expected_question_ids.issubset(existing_question_ids):
+                    print(f"[{sample_idx}] Sample {safe_sample_id} already processed with all {len(expected_question_ids)} questions. Skipping.")
+                    return existing_results
+                else:
+                    missing = expected_question_ids - existing_question_ids
+                    print(f"[{sample_idx}] Sample {safe_sample_id} partially processed. Missing {len(missing)} questions. Re-processing entire sample.")
+            except Exception as e:
+                print(f"[{sample_idx}] Error reading existing results for {safe_sample_id}: {e}. Re-processing.")
+
         # 定义 3 个级别的记忆文件存储路径
         short_mem_path = os.path.join(self.mem_dir, f"{safe_sample_id}_short_term.json")
         mid_mem_path = os.path.join(self.mem_dir, f"{safe_sample_id}_mid_term.json")
@@ -323,7 +354,7 @@ class HaluMemMemoryOSTester:
 
         # 保存当前 Sample 的完整测试结果
             os.makedirs(save_dir, exist_ok=True)
-            with open(f"{save_dir}/{safe_sample_id}.json", 'w', encoding='utf-8') as f:
+            with open(result_file, 'w', encoding='utf-8') as f:
                 json.dump(sample_results, f, indent=2, ensure_ascii=False)
 
         avg_f1 = sum(r['metrics']['f1'] for r in sample_results) / len(sample_results) if sample_results else 0
