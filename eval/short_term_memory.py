@@ -12,7 +12,7 @@ class ShortTermMemory:
     def add_qa_pair(self, qa_pair):
         qa_pair["timestamp"] = qa_pair.get("timestamp", get_timestamp())
         self.memory.append(qa_pair)
-        print(f"短期记忆：添加 QA 对，用户: {qa_pair.get('user_input','')[:30]}...")
+        # print(f"短期记忆：添加 QA 对，用户: {qa_pair.get('user_input','')[:30]}...")
         self.save()
 
     def get_all(self):
@@ -24,7 +24,7 @@ class ShortTermMemory:
     def pop_oldest(self):
         if self.memory:
             msg = self.memory.popleft()
-            print("短期记忆：淘汰最老 QA 对。")
+            # print("短期记忆：淘汰最老 QA 对。")
             self.save()
             return msg
         return None
@@ -38,7 +38,7 @@ class ShortTermMemory:
             with open(self.file_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 self.memory = deque(data, maxlen=self.max_capacity)
-            print("短期记忆：加载成功。")
+            # print("短期记忆：加载成功。")
         except Exception:
             self.memory = deque(maxlen=self.max_capacity)
             print("短期记忆：无历史数据。")

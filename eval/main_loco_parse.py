@@ -458,6 +458,7 @@ def process_single_sample(sample, client, embedding_model, qa_max_workers=5):
         start_sign = short_mem.memory[-1]
         for start_idx, dialog in enumerate(processed_dialogs):
             if dialog["agent_response"] == start_sign["agent_response"] and dialog["user_input"] == start_sign["user_input"] and dialog["timestamp"] == start_sign["timestamp"]:
+                print(f"already run {start_idx/len(processed_dialogs)}")
                 processed_dialogs = processed_dialogs[start_idx + 1:]
                 save_token_consumption = False ##mengyao_debug 如果是从一半开始build/跳过build 就不写入了
                 break
@@ -546,14 +547,18 @@ def main_parallel(sample_max_workers=5, qa_max_workers=5, output_file=""):
     total_samples = len(dataset)
     if os.environ.get("DEBUG") == "1":
         dataset = dataset[:1]
-        dataset[0]['qa'] = dataset[0]['qa'][:10]
+        dataset[0]['qa'] = dataset[0]['qa'][:1] ##mengyao_debug
 
     from sentence_transformers import SentenceTransformer
     model_path = "/mnt/qjhs-sh-lab-01/models/all-MiniLM-L6-v2"
     if not os.path.exists(model_path):
         model_path = "all-MiniLM-L6-v2"
 
-    embedding_model = SentenceTransformer(model_path)
+    device_ = "cuda"
+    if any(sub in LLM_MODEL for sub in ["kimi", "deepseek"]):
+        device_ = "cpu"
+
+    embedding_model = SentenceTransformer(model_path, device=device_)
 
     # 样本级 ThreadPoolExecutor 并发处理
     with ThreadPoolExecutor(max_workers=sample_max_workers) as executor:
@@ -616,6 +621,9 @@ if __name__ == "__main__":
         result_file = f"{result_dir}/locomo_result.json"
         if fusionrag_tag == "true":
             result_file = f"{result_dir}/locomo_result_fusionrag.json"
+    os.makedirs(mem_dir, exist_ok=True)
+    os.makedirs(token_consumption_dir, exist_ok=True)
+    os.makedirs(result_dir, exist_ok=True)
 
     MAX_WORKERS = 10
     qa_max_workers = 16

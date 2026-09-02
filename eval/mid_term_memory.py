@@ -277,7 +277,7 @@ class MidTermMemory:
                 self.sessions = data.get("sessions", {})
                 self.access_frequency = defaultdict(int, data.get("access_frequency", {}))
             self.rebuild_heap()
-            print("中期记忆：加载成功。")
+            # print("中期记忆：加载成功。")
         except Exception as E:
             print(f"中期记忆：无历史数据。{E}")
             self.sessions = {}

@@ -241,7 +241,7 @@ Assistant: {current_page.get("agent_response", "")}"""]
         
         # 3. 将所有用户输入拼接用于主题分析
         input_text = "\n".join([f"User: {page.get('user_input','')}\n" for page in pages])
-        print("动态更新：调用 GPT 生成多子主题摘要...")
+        # print("动态更新：调用 GPT 生成多子主题摘要...")
         multi_summary, prompt_tokens, completion_tokens = gpt_generate_multi_summary(input_text, self.client)
         self.prompt_tokens += prompt_tokens
         self.completion_tokens += completion_tokens
