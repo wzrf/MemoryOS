@@ -27,6 +27,9 @@ client = OpenAIClient(
 # Heat threshold
 H_THRESHOLD = 5.0
 all_memory_summarize_percentage = []
+all_history_len = []
+all_history_stored_len = []
+all_answer_time = []
 
 def update_user_profile_from_top_segment(mid_mem, long_mem, sample_id, client, dynamic_updater: DynamicUpdate):
     """
@@ -93,15 +96,17 @@ def generate_system_response_with_meta(query, short_mem, long_mem, retrieval_que
     Generate system response with speaker roles clearly defined.
     """
     history = short_mem.get_all()
-    history_text = "\n".join([
+    history_text_list = [
         f"{speaker_a}: {qa.get('user_input', '')}\n{speaker_b}: {qa.get('agent_response', '')}\nTime: ({qa.get('timestamp', '')})" 
         for qa in history
-    ])
+    ]
+    history_text = "\n".join(history_text_list)
     
-    retrieval_text = "\n".join([
+    retrieval_text_list = [
         f"【Historical Memory】 {speaker_a}: {page.get('user_input', '')}\n{speaker_b}: {page.get('agent_response', '')}\nTime:({page.get('timestamp', '')})\nConversation chain overview:({page.get('meta_info', '')})\n" 
         for page in retrieval_queue
-    ])
+    ]
+    retrieval_text = "\n".join(retrieval_text_list)
     
     profile_obj = long_mem.get_user_profile(sample_id)
     user_profile_text = str(profile_obj.get("data", "None")) if profile_obj else "None"
@@ -125,7 +130,7 @@ def generate_system_response_with_meta(query, short_mem, long_mem, retrieval_que
         f"Your task is to answer questions about {speaker_a} or {speaker_b} in an extremely concise manner.\n"
         f"When the question is: \"What did the charity race raise awareness for?\", you should not answer in the form of: \"The charity race raised awareness for mental health.\" Instead, it should be: \"mental health\", as this is more concise."
     )
-    
+
     user_prompt = (
         f"<CONTEXT>\n"
         f"Recent conversation between {speaker_a} and {speaker_b}:\n"
@@ -143,14 +148,43 @@ def generate_system_response_with_meta(query, short_mem, long_mem, retrieval_que
         f"If the question is about the duration, answer in the form of several years, months, or days.\n"
         f"Generate answers primarily composed of concrete entities, such as Mentoring program, school speech, etc"
     )
-    
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt}
-    ]
-    
-    response, prompt_tokens, completion_tokens = client.chat_completion_with_usage(model="qwen3-8b", messages=messages, temperature=0.7, max_tokens=2000)
-    return response, system_prompt, user_prompt, prompt_tokens, completion_tokens
+
+    time_start = time.time()
+
+    if os.environ.get("FUSIONRAG", "").lower() == "true":
+        prefix = "Here are the CONTEXT, MEMORY and CHARACTER TRAITS."
+        question = (
+            f"the question is: {query}\n"
+            f"Your task is to answer questions about {speaker_a} or {speaker_b} in an extremely concise manner.\n"
+            f"Please only provide the content of the answer, without including 'answer:'\n"
+            f"For questions that require answering a date or time, strictly follow the format \"15 July 2023\" and provide a specific date whenever possible. For example, if you need to answer \"last year,\" give the specific year of last year rather than just saying \"last year.\" Only provide one year, date, or time, without any extra responses.\n"
+            f"If the question is about the duration, answer in the form of several years, months, or days.\n"
+            f"Generate answers primarily composed of concrete entities, such as Mentoring program, school speech, etc"
+        )
+        fusionrag_list = []
+        history_text_list[0] = f"<CONTEXT>\nRecent conversation between" + history_text_list[0]
+        retrieval_text_list[0] = f"<MEMORY>\nRelevant past conversations:\n" + retrieval_text_list[0]
+        background = f"<CHARACTER TRAITS>\nCharacteristics of {speaker_a}:\n" + background
+        fusionrag_list.extend(history_text_list)
+        fusionrag_list.extend(retrieval_text_list)
+        fusionrag_list.append(background)
+        response, prompt_tokens, completion_tokens = client.chat_completion_fusionrag(
+            model="kimi-k2.6",
+            system_prompt=system_prompt,
+            prefix=prefix,
+            fusionrag_cache_list=fusionrag_list,
+            query_prompt=question,
+        )
+    else:
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+
+        response, prompt_tokens, completion_tokens = client.chat_completion_with_usage(model=LLM_MODEL, messages=messages, temperature=0.7, max_tokens=2000)
+    time_answer = time.time() - time_start
+    return response, system_prompt, user_prompt, prompt_tokens, completion_tokens, time_answer
 
 def process_conversation(conversation_data):
     """
@@ -288,7 +322,7 @@ def process_single_qa_worker(
         "evidence": evidence,
     }
 
-    system_answer, system_prompt, user_prompt, prompt_tokens, completion_tokens = (
+    system_answer, system_prompt, user_prompt, prompt_tokens, completion_tokens, time_answer = (
         generate_system_response_with_meta(
             question,
             local_short_mem,
@@ -302,6 +336,9 @@ def process_single_qa_worker(
             meta_data,
         )
     )
+
+    all_answer_time.append(time_answer)
+    print(f"average qa time={sum(all_answer_time)/len(all_answer_time)}")
 
     print(f"\033[93muser_prompt = {user_prompt}\033[0m")
 
@@ -329,31 +366,22 @@ def process_single_qa_worker(
         "category": category,
         "evidence": evidence,
         "timestamp": get_timestamp(),
+        "time_answer": time_answer,
         "correct": result.lower() == "correct",
     }
 
 
 def process_qa_in_parallel(
-    qa_pairs, sample_id, speaker_a, speaker_b, client, qa_max_workers=5
+    qa_pairs, sample_id, speaker_a, speaker_b, client, qa_max_workers=5, embedding_model=None
 ):
     """辅助函数：针对确定的 QA 列表开启多线程并发处理，并恢复原始顺序"""
     qa_results_indexed = []
-    from sentence_transformers import SentenceTransformer
-    model_path = "/mnt/qjhs-sh-lab-01/models/all-MiniLM-L6-v2"
-    if not os.path.exists(model_path):
-        model_path = "/mnt/data/models/all-MiniLM-L6-v2"
-        if not os.path.exists(model_path):
-            model_path = "all-MiniLM-L6-v2"
-    embedding_models = [
-        SentenceTransformer(model_path)
-        for _ in range(qa_max_workers)
-    ]
+
     with ThreadPoolExecutor(max_workers=qa_max_workers) as qa_executor:
         futures = []
 
         for qa_idx, qa in enumerate(qa_pairs):
             worker_id = qa_idx % qa_max_workers
-            embedding_model = embedding_models[worker_id]
 
             future = qa_executor.submit(
                 process_single_qa_worker,
@@ -395,7 +423,7 @@ def process_single_sample(sample, client, embedding_model, qa_max_workers=5):
     qa_pairs = sample.get("qa", [])
 
     processed_dialogs = process_conversation(conversation_data)
-    processed_dialogs_text = "".join([x["user_input"] + x["agent_response"] for x in processed_dialogs])
+    processed_dialogs_text = " ".join([x["user_input"] + " " + x["agent_response"] for x in processed_dialogs])
     if not processed_dialogs:
         print(f"样本 {sample_id} 没有有效的对话数据，跳过")
         return []
@@ -441,21 +469,36 @@ def process_single_sample(sample, client, embedding_model, qa_max_workers=5):
         update_user_profile_from_top_segment(mid_mem, long_mem, sample_id, client, dynamic_updater)
         dynamic_updater.get_stats()
 
-    history_mid = " ".join([v["summary"] for k, v in mid_mem.sessions.items()])
-    history_long = " ".join([v["data"] for k, v in long_mem.user_profiles.items()])
-    all_summary = history_mid + history_long
-    all_history = processed_dialogs_text
+    history_stored_text = ""
+    memory_short = " ".join([m["user_input"] + " " + m["agent_response"] for m in short_mem.memory])
+    memory_mid = " ".join([v["summary"] for k, v in mid_mem.sessions.items()])
+    for _, session in mid_mem.sessions.items():
+        for detail in session["details"]:
+            if detail["meta_info"] not in memory_mid:
+                memory_mid += detail["meta_info"]
+            if detail["user_input"] not in history_stored_text:
+                history_stored_text += detail["user_input"]
+            if detail["agent_response"] not in history_stored_text:
+                history_stored_text += detail["agent_response"]
+
+    memory_long = " ".join([v["data"] for k, v in long_mem.user_profiles.items()])
+    all_memory = memory_short + memory_mid + memory_long
 
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained("/mnt/qjhs-sh-lab-01/models/Qwen3-8B", trust_remote_code=True)
-    all_summary = tokenizer.encode(all_summary, add_special_tokens=True)
-    all_history = tokenizer.encode(all_history, add_special_tokens=True)
+    all_summary = tokenizer.encode(all_memory, add_special_tokens=True)
+    all_history = tokenizer.encode(processed_dialogs_text, add_special_tokens=True)
+    history_stored = tokenizer.encode(history_stored_text, add_special_tokens=True) ## history_stored 是存储起来的对话，这里就是检验一下是否存储了全部的对话
     all_memory_summarize_percentage.append(len(all_summary)/len(all_history))
+    all_history_len.append(len(all_history))
+    all_history_stored_len.append(len(history_stored))
 
-    print(f"summarize percentage: {sum(all_memory_summarize_percentage)/len(all_memory_summarize_percentage)}")
+    print(f"summarize percentage: {sum(all_memory_summarize_percentage)/len(all_memory_summarize_percentage)} all_history_len={sum(all_history_len)} all_history_stored_len={sum(all_history_stored_len)}")
+
+    # return #mengyao_debug for summary percentage check.
 
     if save_token_consumption:
-        with open(f"./token_consumption/locomo_{sample_id}.json", "w") as f:
+        with open(f"./{token_consumption_dir}/locomo_{sample_id}.json", "w") as f:
             json.dump(dynamic_updater.get_stats(), f)
 
 
@@ -471,6 +514,7 @@ def process_single_sample(sample, client, embedding_model, qa_max_workers=5):
         speaker_b,
         client,
         qa_max_workers=qa_max_workers,
+        embedding_model=embedding_model
     )
     print(
         f"样本 {sample_id} 处理完成，共并发完成 {len(sample_results)} 个 QA 对"
@@ -500,20 +544,22 @@ def main_parallel(sample_max_workers=5, qa_max_workers=5, output_file=""):
     results = []
     completed_samples = 0
     total_samples = len(dataset)
+    if os.environ.get("DEBUG") == "1":
+        dataset = dataset[:1]
+        dataset[0]['qa'] = dataset[0]['qa'][:10]
 
     from sentence_transformers import SentenceTransformer
     model_path = "/mnt/qjhs-sh-lab-01/models/all-MiniLM-L6-v2"
     if not os.path.exists(model_path):
         model_path = "all-MiniLM-L6-v2"
-    embedding_models = []
-    for _ in range(sample_max_workers):
-        embedding_models.append(SentenceTransformer(model_path))
+
+    embedding_model = SentenceTransformer(model_path)
 
     # 样本级 ThreadPoolExecutor 并发处理
     with ThreadPoolExecutor(max_workers=sample_max_workers) as executor:
         future_to_sample_id = {
             executor.submit(
-                process_single_sample, sample, client, embedding_models[idx % sample_max_workers], qa_max_workers
+                process_single_sample, sample, client, embedding_model, qa_max_workers
             ): sample.get("sample_id", f"sample_{idx+1}")
             for idx, sample in enumerate(dataset)
         }
@@ -549,15 +595,32 @@ def main_parallel(sample_max_workers=5, qa_max_workers=5, output_file=""):
 
 
 if __name__ == "__main__":
-    mem_dir = "mem_tmp_loco_final"
+    LLM_MODEL = "Kimi-K2.6"
+
+    token_consumption_dir = "./token_consumption"
+    mem_dir = "mem_tmp_loco"
+    result_dir = "./results"
     fusionrag_tag = os.environ.get("FUSIONRAG", "false").lower()
-    result_file = "./results/locomo_result.json"
+    result_file = f"{result_dir}/locomo_result.json"
+
     if fusionrag_tag == "true":
-        mem_dir = "mem_tmp_loco_fusionrag"
-        result_file = "./results/locomo_result_fusionrag.json"
+        mem_dir += "_fusionrag"
+        token_consumption_dir += "_fusionrag"
+        result_file = f"{result_dir}/locomo_result_fusionrag.json"
+
+
+    if LLM_MODEL.lower() != "qwen3-8b":
+        mem_dir += f"_{LLM_MODEL}"
+        token_consumption_dir += f"_{LLM_MODEL}"
+        result_dir += f"_{LLM_MODEL}"
+        result_file = f"{result_dir}/locomo_result.json"
+        if fusionrag_tag == "true":
+            result_file = f"{result_dir}/locomo_result_fusionrag.json"
 
     MAX_WORKERS = 10
+    qa_max_workers = 16
     if os.environ.get("DEBUG") == "1":
         MAX_WORKERS = 1
+        qa_max_workers = 1
 
-    main_parallel(sample_max_workers=MAX_WORKERS, qa_max_workers=16, output_file="./results/locomo_result.json")
+    main_parallel(sample_max_workers=MAX_WORKERS, qa_max_workers=qa_max_workers, output_file=result_file)

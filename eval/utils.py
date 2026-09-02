@@ -13,8 +13,8 @@ embedding_lock = threading.Lock()
 
 gpt_client = OpenAI(
         api_key='sk-11ce7640e46049a6977c0d96ba855ffb',
-    # base_url='https://dashscope.aliyuncs.com/compatible-mode/v1'
-base_url = 'http://127.0.0.1:30004/v1/'
+        base_url = 'http://127.0.0.1:30004/v1/'  ## qwen3
+        # base_url = 'http://127.0.0.1:30003/v1/' ## kimi
 )
 def get_timestamp():
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
@@ -79,7 +79,8 @@ class OpenAIClient:
             # extra_body={"enable_thinking":False}
             extra_body={
                 "chat_template_kwargs": {
-                    "enable_thinking": False
+                    "enable_thinking": False,
+                    "thinking": False
                 }
             }
         )
@@ -94,10 +95,10 @@ class OpenAIClient:
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
-            # extra_body={"enable_thinking":False}
             extra_body={
                 "chat_template_kwargs": {
-                    "enable_thinking": False
+                    "enable_thinking": False,
+                    "thinking": False
                 }
             }
         )
@@ -105,11 +106,16 @@ class OpenAIClient:
         return content, response.usage.prompt_tokens, response.usage.completion_tokens
 
     def chat_completion_fusionrag(self, model, system_prompt: str, prefix: str, fusionrag_cache_list: list[str], query_prompt: str, temperature=0.7, max_tokens=2000):
-        model = "qwen3-8b"
-        template = {
-            "DEFAULT_SYSTEM_PROMPT": f"""<|im_start|>system\n{system_prompt}\n{prefix}""",
-            "USER_PROMPT": f"""<|im_end|>\n<|im_start|>user\n\nQuestion: /no_think {query_prompt}<|im_end|>\n<|im_start|>assistant</think>\nAnswer: """
-        }
+        if "kimi" in model.lower():
+            template = {
+                "DEFAULT_SYSTEM_PROMPT": f"""<|im_system|>system<|im_middle|>\n{system_prompt}\n{prefix}""",
+                "USER_PROMPT": f"""<|im_end|><|im_user|>user<|im_middle|>{query_prompt}<|im_end|><|im_assistant|>assistant<|im_middle|><think></think> Answer:"""
+            }
+        else:  ## default: qwen
+            template = {
+                "DEFAULT_SYSTEM_PROMPT": f"""<|im_start|>system\n{system_prompt}\n{prefix}""",
+                "USER_PROMPT": f"""<|im_end|>\n<|im_start|>user\n\nQuestion: /no_think {query_prompt}<|im_end|>\n<|im_start|>assistant\nAnswer: </think>"""
+            }
         print("调用 fusionrag GPT 接口，模型:", model)
 
         recompute_tokens, recompute_tokens_list, retrieved_docs, recompute_rate, sorted_doc_index, sorted_doc_index_before = self.fusion_rag_model.draft_one_question(
@@ -144,7 +150,7 @@ class OpenAIClient:
             method_keyword="",
         )
 
-        return content.strip(), usage.prompt_tokens, usage.completion_tokens
+        return content.strip(), usage['prompt_tokens'], usage['completion_tokens']
 
 def gpt_generate_answer(prompt, messages, client):
     return client.chat_completion_with_usage(model="qwen3-8b", messages=messages, temperature=0.7, max_tokens=2000)
@@ -277,6 +283,7 @@ def gpt_generate_multi_summary(text, client):
                                                       )
     else:
         response_text, prompt_tokens, completion_tokens = gpt_generate_answer(prompt, messages, client)
+    response_text = clean_json(response_text)
     import json
     try:
         summaries = json.loads(response_text)
@@ -567,3 +574,18 @@ def compute_time_decay(session_timestamp, current_timestamp, tau=3600):
     t2 = datetime.strptime(current_timestamp, fmt)
     delta = (t2 - t1).total_seconds()
     return np.exp(-delta/tau)
+
+
+def clean_json(response: str) -> str:
+    """
+    Cleans the model response by:
+    1. Removing enclosing code block markers (```[language] ... ```).
+    2. Parsing the JSON content safely.
+    3. Returning the value of the "data" key if present, otherwise trying to return the parsed list/dict.
+    """
+    import re
+    pattern = r"```(?:json)?\s*([\s\S]*?)\s*```"
+    match = re.search(pattern, response.strip())
+    cleaned = match.group(1).strip() if match else response.strip()
+
+    return cleaned
