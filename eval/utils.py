@@ -70,7 +70,7 @@ class OpenAIClient:
 
     def chat_completion(self, model, messages, temperature=0.7, max_tokens=2000):
         model = "qwen3-8b"
-        print("调用 GPT 接口，模型:", model)
+        # print("调用 GPT 接口，模型:", model)
         response = gpt_client.chat.completions.create(
             model=model,
             messages=messages,
@@ -89,7 +89,7 @@ class OpenAIClient:
 
     def chat_completion_with_usage(self, model, messages, temperature=0.7, max_tokens=2000):
         model = "qwen3-8b"
-        print("调用 GPT 接口，模型:", model)
+        # print("调用 GPT 接口，模型:", model)
         response = gpt_client.chat.completions.create(
             model=model,
             messages=messages,

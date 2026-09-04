@@ -95,6 +95,7 @@ def build_memory_for_sample(sample, embedding_model):
         start_sign = short_mem.memory[-1]
         for start_idx, dialog in enumerate(dialogs):
             if dialog["agent_response"] == start_sign["agent_response"] and dialog["user_input"] == start_sign["user_input"] and dialog["timestamp"] == start_sign["timestamp"]:
+                print(f"already finished {start_idx/len(dialogs)*100}%")
                 dialogs = dialogs[start_idx + 1:]
                 save_token_consumption = False ##mengyao_debug 如果是从一半开始build/跳过build 就不写入了
                 break
@@ -109,7 +110,7 @@ def build_memory_for_sample(sample, embedding_model):
         dynamic_updater.get_stats()
 
     if save_token_consumption:
-        with open(f"./token_consumption/longmemeval_{sample_id}.json", "w") as f:
+        with open(f"{TOKEN_CONSUMPTION_DIR}/longmemeval_{sample_id}.json", "w") as f:
             json.dump(dynamic_updater.get_stats(), f)
 
     return short_mem, mid_mem, long_mem, dynamic_updater
@@ -275,14 +276,16 @@ def main_parallel_longmemeval(
         print(f"读取数据集失败: {e}")
         return
 
-    # 预先加载 Embedding 模型
     from sentence_transformers import SentenceTransformer
     model_path = "/mnt/qjhs-sh-lab-01/models/all-MiniLM-L6-v2"
     if not os.path.exists(model_path):
         model_path = "all-MiniLM-L6-v2"
-    embedding_models = []
-    for _ in range(sample_max_workers):
-        embedding_models.append(SentenceTransformer(model_path))
+
+    device_ = "cuda"
+    if any(sub in LLM_MODEL.lower() for sub in ["kimi", "deepseek"]):
+        device_ = "cpu"
+
+    embedding_model = SentenceTransformer(model_path, device=device_)
 
     results = []
     total_samples = len(dataset)
@@ -294,7 +297,7 @@ def main_parallel_longmemeval(
             executor.submit(
                 process_single_longmemeval_sample,
                 sample,
-                embedding_models[i % sample_max_workers],
+                embedding_model,
             ): sample.get("question_id", f"idx_{i}")
             for i, sample in enumerate(dataset)
         }
@@ -318,15 +321,32 @@ def main_parallel_longmemeval(
 
 ##mengyao_debug LLM配置： 搜索 http://127.0.0.1:30004 即可
 if __name__ == "__main__":
-    MAX_WORKERS = 32
+    LLM_MODEL = "Kimi-K2.6"
+    MAX_WORKERS = 20
     if os.environ.get("DEBUG") == "1":
         MAX_WORKERS = 1
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, default="none", help="dataset")
     args = parser.parse_args()
     MEM_DIR = "mem_tmp_longmemeval"
+    RESULT_DIR = "results"
+    TOKEN_CONSUMPTION_DIR = "token_consumption"
+
+    if LLM_MODEL.lower() != "qwen3_8b":
+        MEM_DIR = f"{MEM_DIR}_{LLM_MODEL}"
+        RESULT_DIR = f"{RESULT_DIR}_{LLM_MODEL}"
+        TOKEN_CONSUMPTION_DIR = f"{TOKEN_CONSUMPTION_DIR}_{LLM_MODEL}"
+
+    os.makedirs(MEM_DIR, exist_ok=True)
+    os.makedirs(RESULT_DIR, exist_ok=True)
+    os.makedirs(TOKEN_CONSUMPTION_DIR, exist_ok=True)
+
+    print(f"MEM_DIR: {MEM_DIR}")
+    print(f"RESULT_DIR: {RESULT_DIR}")
+    print(f"TOKEN_CONSUMPTION_DIR: {TOKEN_CONSUMPTION_DIR}")
+
     main_parallel_longmemeval(
         data_path=args.dataset, ##mengyao_debug
-        output_file="./results/longmemeval_result.json",
+        output_file=f"{RESULT_DIR}/longmemeval_result.json",
         sample_max_workers=MAX_WORKERS,  # 同时并发处理 8 个 Sample
     )

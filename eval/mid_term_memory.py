@@ -268,7 +268,7 @@ class MidTermMemory:
         with open(self.file_path, "w", encoding="utf-8") as f:
             data = {"sessions": sessions_to_save, "access_frequency": dict(self.access_frequency)}
             json.dump(data, f, ensure_ascii=False, indent=2)
-        print("中期记忆：保存成功。")
+        # print("中期记忆：保存成功。")
 
     def load(self):
         try:
