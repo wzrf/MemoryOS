@@ -374,7 +374,7 @@ if __name__ == "__main__":
     # 配置你的 JSON 数据文件路径
     tasks = [
         # ("./results/longmemeval_result.json", "longmemeval"),
-        ("./results/locomo_result_fusionrag.json", "locomo"),
+        ("./results_Kimi-K2.6/locomo_result.json", "locomo"),
     ]
 
     for file_path, name in tasks:

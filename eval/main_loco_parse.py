@@ -11,6 +11,7 @@ from judge import AnswerJudge
 import openai
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 # import tiktoken
 import os
 total_tokens = 0
@@ -372,10 +373,57 @@ def process_single_qa_worker(
 
 
 def process_qa_in_parallel(
-    qa_pairs, sample_id, speaker_a, speaker_b, client, qa_max_workers=5, embedding_model=None
+    qa_pairs, sample_id, speaker_a, speaker_b, client, qa_max_workers=5, embedding_model=None,
+    output_file=None, result_lock=None
 ):
     """辅助函数：针对确定的 QA 列表开启多线程并发处理，并恢复原始顺序"""
     qa_results_indexed = []
+
+    def append_result_to_file(result):
+        """将单个结果追加到输出文件，使用锁保证线程安全"""
+        if not output_file:
+            return
+        try:
+            # 如果提供了锁，则在锁内执行整个读取-追加-写入序列
+            if result_lock:
+                with result_lock:
+                    # 读取现有文件内容
+                    if os.path.exists(output_file):
+                        with open(output_file, 'r', encoding='utf-8') as f:
+                            content = f.read().strip()
+                            if content:
+                                existing_data = json.loads(content)
+                            else:
+                                existing_data = []
+                    else:
+                        existing_data = []
+
+                    # 追加新结果
+                    existing_data.append(result)
+
+                    # 写入文件
+                    with open(output_file, 'w', encoding='utf-8') as f:
+                        json.dump(existing_data, f, ensure_ascii=False, indent=2)
+            else:
+                # 没有锁，直接执行（可能存在竞争）
+                if os.path.exists(output_file):
+                    with open(output_file, 'r', encoding='utf-8') as f:
+                        content = f.read().strip()
+                        if content:
+                            existing_data = json.loads(content)
+                        else:
+                            existing_data = []
+                else:
+                    existing_data = []
+
+                existing_data.append(result)
+
+                with open(output_file, 'w', encoding='utf-8') as f:
+                    json.dump(existing_data, f, ensure_ascii=False, indent=2)
+
+            print(f"样本 {sample_id}: 问题 '{result['question'][:50]}...' 结果已写入文件")
+        except Exception as e:
+            print(f"样本 {sample_id}: 写入结果文件时出错: {e}")
 
     with ThreadPoolExecutor(max_workers=qa_max_workers) as qa_executor:
         futures = []
@@ -398,8 +446,10 @@ def process_qa_in_parallel(
 
         for future in as_completed(futures):
             try:
-                qa_results_indexed.append(future.result())
-
+                qa_idx, result = future.result()
+                qa_results_indexed.append((qa_idx, result))
+                # 每完成一个 QA 就写入文件
+                append_result_to_file(result)
             except Exception as e:
                 print(
                     f"样本 {sample_id} 处理 QA 时出错: {e}"
@@ -412,7 +462,7 @@ def process_qa_in_parallel(
     return [res for _, res in qa_results_indexed]
 
 
-def process_single_sample(sample, client, embedding_model, qa_max_workers=5):
+def process_single_sample(sample, client, embedding_model, qa_max_workers=5, output_file=None, result_lock=None):
     """单个样本的完整处理逻辑（提供给 main_parallel 调用）：
 
     1. 顺序构建/更新该 sample 的记忆
@@ -421,6 +471,32 @@ def process_single_sample(sample, client, embedding_model, qa_max_workers=5):
     sample_id = sample.get("sample_id", "unknown_sample")
     conversation_data = sample.get("conversation", {})
     qa_pairs = sample.get("qa", [])
+
+    # 如果提供了输出文件，则加载已有结果，跳过已处理的问题
+    if output_file and os.path.exists(output_file):
+        try:
+            # 如果有锁，则在锁内读取文件，避免并发读写冲突
+            if result_lock:
+                with result_lock:
+                    with open(output_file, 'r', encoding='utf-8') as f:
+                        content = f.read().strip()
+            else:
+                with open(output_file, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+
+            if content:
+                existing_results = json.loads(content)
+                # 提取当前 sample_id 下已经处理过的问题集合
+                processed_questions = {res['question'] for res in existing_results
+                                      if res.get('sample_id') == sample_id}
+                # 过滤掉已处理的问题
+                initial_len = len(qa_pairs)
+                qa_pairs = [qa for qa in qa_pairs if qa.get('question') not in processed_questions]
+                print(f"样本 {sample_id}: 跳过 {initial_len - len(qa_pairs)} 个已处理的问题，剩余 {len(qa_pairs)} 个问题待处理")
+            else:
+                print(f"样本 {sample_id}: 结果文件为空，将处理所有问题")
+        except (json.JSONDecodeError, KeyError, Exception) as e:
+            print(f"样本 {sample_id}: 读取结果文件时出错 {output_file}: {e}，将处理所有问题")
 
     processed_dialogs = process_conversation(conversation_data)
     processed_dialogs_text = " ".join([x["user_input"] + " " + x["agent_response"] for x in processed_dialogs])
@@ -515,7 +591,9 @@ def process_single_sample(sample, client, embedding_model, qa_max_workers=5):
         speaker_b,
         client,
         qa_max_workers=qa_max_workers,
-        embedding_model=embedding_model
+        embedding_model=embedding_model,
+        output_file=output_file,
+        result_lock=result_lock
     )
     print(
         f"样本 {sample_id} 处理完成，共并发完成 {len(sample_results)} 个 QA 对"
@@ -555,16 +633,20 @@ def main_parallel(sample_max_workers=5, qa_max_workers=5, output_file=""):
         model_path = "all-MiniLM-L6-v2"
 
     device_ = "cuda"
-    if any(sub in LLM_MODEL for sub in ["kimi", "deepseek"]):
+    if any(sub in LLM_MODEL.lower() for sub in ["kimi", "deepseek"]):
         device_ = "cpu"
 
     embedding_model = SentenceTransformer(model_path, device=device_)
+
+    # 创建锁用于保护结果文件写入
+    result_lock = threading.Lock()
 
     # 样本级 ThreadPoolExecutor 并发处理
     with ThreadPoolExecutor(max_workers=sample_max_workers) as executor:
         future_to_sample_id = {
             executor.submit(
-                process_single_sample, sample, client, embedding_model, qa_max_workers
+                process_single_sample, sample, client, embedding_model, qa_max_workers,
+                output_file=output_file, result_lock=result_lock
             ): sample.get("sample_id", f"sample_{idx+1}")
             for idx, sample in enumerate(dataset)
         }
@@ -578,18 +660,9 @@ def main_parallel(sample_max_workers=5, qa_max_workers=5, output_file=""):
                 sample_results = future.result()
                 if sample_results:
                     results.extend(sample_results)
-
-                    # 主线程独立负责写入文件，避免并发文件写冲突
-                    try:
-                        with open(output_file, "w", encoding="utf-8") as f:
-                            json.dump(
-                                results, f, ensure_ascii=False, indent=2
-                            )
-                        print(
-                            f"进度 [{completed_samples}/{total_samples}]: 样本 {sample_id} 结果已写入 {output_file} (累计 {len(results)} 条数据)"
-                        )
-                    except Exception as e:
-                        print(f"主线程写入文件时出错：{e}")
+                    print(
+                        f"进度 [{completed_samples}/{total_samples}]: 样本 {sample_id} 处理完成，累计 {len(results)} 条结果"
+                    )
 
             except Exception as e:
                 print(f"样本 {sample_id} 在子线程处理过程中发生错误：{e}")
@@ -626,7 +699,7 @@ if __name__ == "__main__":
     os.makedirs(result_dir, exist_ok=True)
 
     MAX_WORKERS = 10
-    qa_max_workers = 16
+    qa_max_workers = 8
     if os.environ.get("DEBUG") == "1":
         MAX_WORKERS = 1
         qa_max_workers = 1
