@@ -10,14 +10,6 @@ from datetime import datetime
 from utils import OpenAIClient
 from utils import get_timestamp, generate_id, get_embedding, normalize_vector, llm_extract_keywords, compute_time_decay, get_embedding_with_model
 
-client = OpenAIClient(
-    api_key='',
-    base_url='https://cn2us02.opapi.win/v1',
-    recomputation_rate=float(os.environ.get("recomputation_rate")),
-    sglang_url="http://127.0.0.1:30003/v1/completions",
-    sglang_url_prefiller="http://127.0.0.1:30003/v1/completions"
-)
-
 def compute_recency(last_visit_time, tau=24):
     from datetime import datetime
     fmt = "%Y-%m-%d %H:%M:%S"
@@ -33,7 +25,7 @@ def compute_segment_heat(session, alpha=0.8, beta=0.8, gamma=0.0001):
     return alpha * N_visit + beta * L_interaction + gamma * R_recency
 
 class MidTermMemory:
-    def __init__(self, embedding_model, max_capacity=7, file_path="mid_term.json"):
+    def __init__(self, embedding_model, client, max_capacity=7, file_path="mid_term.json"):
         self.max_capacity = max_capacity
         self.file_path = file_path
         self.sessions = {}
@@ -41,6 +33,7 @@ class MidTermMemory:
         self.heap = []
         self.embedding_model = embedding_model
         self.load()
+        self.client = client
 
     def get_page_by_id(self, page_id):
         for session in self.sessions.values():
@@ -85,7 +78,7 @@ class MidTermMemory:
         session_id = generate_id("session")
         summary_vec = get_embedding_with_model(summary, self.embedding_model)
         summary_vec = normalize_vector(summary_vec).tolist()
-        summary_keywords, prompt_tokens, completion_tokens = llm_extract_keywords(summary, client=client)
+        summary_keywords, prompt_tokens, completion_tokens = llm_extract_keywords(summary, client=self.client)
         summary_keywords = list(summary_keywords)
         
         new_details = []
@@ -95,7 +88,7 @@ class MidTermMemory:
             full_text = f"User: {page.get('user_input','')} Assiant: {page.get('agent_response','')}"
             inp_vec = get_embedding_with_model(full_text, self.embedding_model)
             inp_vec = normalize_vector(inp_vec).tolist()
-            page_keywords, prompt_tokens_, completion_tokens_ = llm_extract_keywords(full_text, client=client)
+            page_keywords, prompt_tokens_, completion_tokens_ = llm_extract_keywords(full_text, client=self.client)
             prompt_tokens += prompt_tokens_
             completion_tokens += completion_tokens_
             page_keywords = list(page_keywords)

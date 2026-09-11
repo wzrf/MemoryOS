@@ -20,16 +20,6 @@ from utils import (
 from judge import AnswerJudge
 from main_loco_parse import update_user_profile_from_top_segment
 
-# 初始化 OpenAI 客户端
-client = OpenAIClient(
-    api_key='sk-11ce7640e46049a6977c0d96ba855ffb',
-    base_url='http://127.0.0.1:30004/v1/',
-    recomputation_rate=float(os.environ.get("recomputation_rate", 0.0)),
-    sglang_url="http://127.0.0.1:30003/v1/completions",
-    sglang_url_prefiller="http://127.0.0.1:30003/v1/completions",
-)
-
-
 def parse_session_dialogs(session_messages, session_date):
     """解析单次 haystack session 中的 message 数组为标准化对话对。"""
     processed = []
@@ -79,7 +69,7 @@ def build_memory_for_sample(sample, embedding_model):
     long_mem_path = f"{MEM_DIR}/{sample_id}_long_term.json"
 
     short_mem = ShortTermMemory(max_capacity=5, file_path=short_mem_path)
-    mid_mem = MidTermMemory(max_capacity=2000, file_path=mid_mem_path, embedding_model=embedding_model)
+    mid_mem = MidTermMemory(max_capacity=2000, file_path=mid_mem_path, embedding_model=embedding_model, client=client)
     long_mem = LongTermMemory(file_path=long_mem_path, embedding_model=embedding_model)
     dynamic_updater = DynamicUpdate(
         short_mem, mid_mem, long_mem, topic_similarity_threshold=0.6, client=client
@@ -174,7 +164,7 @@ def answer_single_sample(sample, embedding_model=None):
     long_mem_path = f"{MEM_DIR}/{sample_id}_long_term.json"
 
     short_mem = ShortTermMemory(max_capacity=5, file_path=short_mem_path)
-    mid_mem = MidTermMemory(max_capacity=2000, file_path=mid_mem_path, embedding_model=embedding_model)
+    mid_mem = MidTermMemory(max_capacity=2000, file_path=mid_mem_path, embedding_model=embedding_model, client=client)
     long_mem = LongTermMemory(file_path=long_mem_path, embedding_model=embedding_model)
     dynamic_updater = DynamicUpdate(
         short_mem, mid_mem, long_mem, topic_similarity_threshold=0.6, client=client
@@ -281,9 +271,9 @@ def main_parallel_longmemeval(
     if not os.path.exists(model_path):
         model_path = "all-MiniLM-L6-v2"
 
-    device_ = "cuda"
-    if any(sub in LLM_MODEL.lower() for sub in ["kimi", "deepseek"]):
-        device_ = "cpu"
+    device_ = "cpu"
+    # if any(sub in LLM_MODEL.lower() for sub in ["kimi", "deepseek"]):
+    #     device_ = "cpu"
 
     embedding_model = SentenceTransformer(model_path, device=device_)
 
@@ -321,13 +311,33 @@ def main_parallel_longmemeval(
 
 ##mengyao_debug LLM配置： 搜索 http://127.0.0.1:30004 即可
 if __name__ == "__main__":
-    LLM_MODEL = "Kimi-K2.6"
-    MAX_WORKERS = 20
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--LLM_MODEL', type=str,
+                        help='llm model')
+    parser.add_argument('--API_BASE_URL', type=str,
+                        help='llm model api')
+    parser.add_argument("--dataset", type=str, default="none", help="dataset")
+
+    args = parser.parse_args()
+    LLM_MODEL = args.LLM_MODEL
+    API_BASE_URL = args.API_BASE_URL
+
+    # Initialize OpenAI client
+    client = OpenAIClient(
+        api_key='sk-11ce7640e46049a6977c0d96ba855ffb',
+        # base_url='https://dashscope.aliyuncs.com/compatible-mode/v1'
+        base_url=API_BASE_URL,
+        recomputation_rate=float(os.environ.get("recomputation_rate")),
+        # sglang_url="http://127.0.0.1:30003/v1/completions",
+        # sglang_url_prefiller="http://127.0.0.1:30003/v1/completions"
+    )
+
+    MAX_WORKERS = 32
     if os.environ.get("DEBUG") == "1":
         MAX_WORKERS = 1
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", type=str, default="none", help="dataset")
-    args = parser.parse_args()
+
+
     MEM_DIR = "mem_tmp_longmemeval"
     RESULT_DIR = "results"
     TOKEN_CONSUMPTION_DIR = "token_consumption"

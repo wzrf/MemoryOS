@@ -1,5 +1,182 @@
 from pathlib import Path
 import json
+import re
+import hashlib
+from openai import OpenAI
+import os
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import defaultdict
+import nltk
+from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
+import numpy as np
+
+SYSTEM = """You are a strict, method-blind evaluator of question answering. Judge only whether the candidate answer is semantically correct
+  according to the question and reference answer. Do not infer which system produced it."""
+TEMPLATE = """Decide whether the candidate answer is correct.
+
+  Rules:
+  1. Accept concise paraphrases, equivalent names, equivalent date/number formats, and a correct answer embedded in harmless extra explanation.
+  2. Reject a wrong person, entity, event, date, ordering, count, amount, or polarity; a contradiction; a refusal when the reference answers the question; or an answer missing a required list item, comparison, calculation, or event.
+  3. Extra text is harmless only if it does not add a materially false answer claim.
+  4. For open-ended preference or recommendation questions, the answer need not copy every example in the reference, but it must correctly use the core personal information required by the reference.
+  5. Treat the reference as the scoring ground truth. Do not use outside knowledge.
+
+  Question:
+  {question}
+
+  Reference answer:
+  {reference}
+
+  Candidate answer:
+  {prediction}
+
+  Do not REASON. JUST GIVE THE RESULT.
+  Return exactly one JSON object with one boolean field and no other text:
+  {{"correct": true}}
+  or
+  {{"correct": false}}"""
+
+def text_sha256(text: str) -> str:
+    """Return SHA256 hex digest of the text."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+PROMPT_SHA256 = text_sha256(SYSTEM + "\n\0\n" + TEMPLATE)
+
+# Cache for LLM judge results
+CACHE_FILE = Path(".llm_judge_cache.json")
+_cache_lock = threading.RLock()
+_judge_cache = {}
+
+def load_cache():
+    """Load judge cache from disk."""
+    global _judge_cache
+    if CACHE_FILE.exists():
+        try:
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                _judge_cache = json.load(f)
+        except Exception as e:
+            print(f"Warning: Failed to load cache file: {e}")
+            _judge_cache = {}
+    else:
+        _judge_cache = {}
+
+def save_cache():
+    """Save judge cache to disk."""
+    with _cache_lock:
+        try:
+            with open(CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump(_judge_cache, f, indent=2)
+        except Exception as e:
+            print(f"Warning: Failed to save cache file: {e}")
+
+def get_cache_key(question: str, reference: str, prediction: str) -> str:
+    """Generate a cache key from question, reference, prediction."""
+    # Use SHA256 of concatenated strings
+    content = f"{question}|{reference}|{prediction}"
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+# Load cache on module import
+load_cache()
+
+def parse_correct(content: object) -> bool:
+    text = str(content or "").strip()
+    text = re.sub(r"^(?:json)?\s*", "", text, flags=re.I)
+    text = re.sub(r"\s*$", "", text)
+    try:
+        value = json.loads(text)
+    except Exception as e:
+        print(f"parse error: {e} text: {text}")
+        raise ValueError("judge response is not valid JSON")
+    if not isinstance(value, dict) or set(value) != {"correct"} or not isinstance(value["correct"], bool):
+        raise ValueError("judge response is not strict correct:boolean JSON")
+    return value["correct"]
+
+def request_once(api_key: str, endpoint: str, model: str, item: dict, timeout: int = 30, max_tokens: int = 100) -> tuple[bool, dict, str]:
+    # 初始化客户端
+    client = OpenAI(
+        api_key=api_key,
+        base_url=endpoint,
+        timeout=timeout,
+    )
+    # 调用 Chat Completions API
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": SYSTEM},
+            {"role": "user", "content": TEMPLATE.format(**item)},
+        ],
+        max_tokens=2048,
+        stream=False,
+        response_format={"type": "json_object"},
+        extra_body={"chat_template_kwargs": {"reasoning_effort": "low"}}
+    )
+    # 解析响应数据
+    choice = completion.choices[0]
+    message = choice.message
+    content = message.content or ""
+    # 如果 content 为空，尝试获取推理链内容（兼容深度思考模型）
+    if not content and hasattr(message, "reasoning_content"):
+        content = message.reasoning_content or ""
+    # 获取 token 使用量字典
+    usage = completion.usage.model_dump() if completion.usage else {}
+    return parse_correct(content), usage, str(completion.model or "")
+
+def llm_judge(question: str, reference: str, prediction: str,
+              api_key: str = None, endpoint: str = None, model: str = None,
+              max_retries: int = 3, use_cache: bool = True) -> bool:
+    """
+    Judge correctness using LLM with retry logic and caching.
+    Returns True if correct, False otherwise.
+
+    Args:
+        question: The question text
+        reference: Reference/gold answer
+        prediction: Predicted/system answer
+        api_key: API key, defaults to "sk-dummy"
+        endpoint: API endpoint, defaults to "http://127.0.0.1:30002/v1"
+        model: Model name, defaults to "GLM-5.3"
+        max_retries: Maximum number of retry attempts
+        use_cache: Whether to use cache for previously judged items
+    """
+    # Set defaults
+    if api_key is None:
+        api_key = "sk-dummy"
+    if endpoint is None:
+        endpoint = "http://127.0.0.1:30002/v1"
+    if model is None:
+        model = "GLM-5.3"
+
+    # Check cache if enabled
+    if use_cache:
+        cache_key = get_cache_key(question, reference, prediction)
+        with _cache_lock:
+            if cache_key in _judge_cache:
+                cached_result = _judge_cache[cache_key]
+                # print(f"Cache hit for judgment (key: {cache_key[:16]}...): {cached_result}")
+                return cached_result
+
+    item = {"question": question, "reference": reference, "prediction": prediction}
+
+    for attempt in range(max_retries):
+        try:
+            correct, usage, model_name = request_once(api_key, endpoint, model, item)
+
+            # Store in cache if enabled
+            if use_cache:
+                with _cache_lock:
+                    _judge_cache[cache_key] = correct
+                    # Save cache periodically or on exit, but we'll save immediately
+                    save_cache()
+
+            # Optionally log usage
+            # print(f"Judge usage: {usage}")
+            return correct
+        except Exception as e:
+            print(f"Judge attempt {attempt+1} failed: {e}")
+            if attempt == max_retries - 1:
+                raise
+    return False
 
 
 def run_dir(path: str, name: str):
@@ -21,18 +198,6 @@ def run_dir(path: str, name: str):
 
     print(f"{name}: average prompt_tokens: {sum(all_prompt_tokens)/len(all_prompt_tokens)} "
           f"average completion_tokens: {sum(all_completion_tokens)/len(all_completion_tokens)}")
-
-
-run_dir("./token_consumption", "locomo")
-run_dir("./token_consumption", "longmemeval")
-
-
-import json
-from collections import defaultdict
-from pathlib import Path
-import nltk
-from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
-import numpy as np
 
 
 def simple_tokenize(text):
@@ -98,7 +263,9 @@ def calculate_bleu_scores(prediction: str, reference: str):
     return scores
 
 
-def process_eval_file(file_path: str, dataset_name: str):
+def process_eval_file(file_path: str, dataset_name: str, use_llm_judge: bool = False,
+                       api_key: str = None, endpoint: str = None, model: str = None,
+                       max_workers: int = 32):
     """读取单文件 JSON 列表并统计 Token、F1、Accuracy 和 BLEU 1-4"""
     file_p = Path(file_path)
     if not file_p.exists():
@@ -115,6 +282,16 @@ def process_eval_file(file_path: str, dataset_name: str):
     if not isinstance(data_list, list):
         print(f"Error: Expected a JSON array in {file_path}")
         return
+
+    # LLM judge configuration
+    if use_llm_judge:
+        if api_key is None:
+            api_key = os.environ.get("OPENAI_API_KEY", "sk-dummy")
+        if endpoint is None:
+            endpoint = os.environ.get("OPENAI_BASE_URL", "http://127.0.0.1:30002/v1")
+        if model is None:
+            model = os.environ.get("LLM_MODEL", "GLM-5.3")
+        print(f"LLM judge configured: endpoint={endpoint}, model={model}")
 
     all_prompt_tokens = []
     all_completion_tokens = []
@@ -133,7 +310,9 @@ def process_eval_file(file_path: str, dataset_name: str):
     global_judge_scores = []
     global_bleus = defaultdict(list)
 
-    for item in data_list:
+    # Collect all items data for processing
+    item_data_list = []
+    for idx, item in enumerate(data_list):
         # 1. 收集 Token 消耗
         p_tok = item.get("prompt_tokens", 0)
         c_tok = item.get("completion_tokens", 0)
@@ -153,10 +332,61 @@ def process_eval_file(file_path: str, dataset_name: str):
             pred = item.get("system_answer") or item.get("prediction", "")
             ref = item.get("original_answer") or item.get("reference", "")
 
-        correct_val = item.get("correct")
-        judge_score = None
-        if correct_val is not None:
-            judge_score = 1.0 if correct_val is True else (0.0 if correct_val is False else float(correct_val))
+        # 获取问题文本
+        q_text = item.get("question", cat_key)
+
+        # 存储项数据
+        item_data_list.append({
+            "idx": idx,
+            "cat_key": cat_key,
+            "pred": pred,
+            "ref": ref,
+            "q_text": q_text,
+            "item": item,
+        })
+
+    # 并发执行 LLM judge（如果需要）
+    judge_results = [None] * len(item_data_list)
+    if use_llm_judge:
+        print(f"Starting concurrent LLM judge with {max_workers} workers...")
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_idx = {}
+            for item_data in item_data_list:
+                idx = item_data["idx"]
+                future = executor.submit(
+                    llm_judge,
+                    question=item_data["q_text"],
+                    reference=item_data["ref"],
+                    prediction=item_data["pred"],
+                    api_key=api_key,
+                    endpoint=endpoint,
+                    model=model,
+                    use_cache=True
+                )
+                future_to_idx[future] = idx
+
+            # Collect results
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    correct = future.result()
+                    judge_results[idx] = 1.0 if correct else 0.0
+                except Exception as e:
+                    print(f"LLM judge failed for item {idx}: {e}")
+                    judge_results[idx] = None
+        print("LLM judge completed.")
+
+    # Process each item to compute metrics
+    for item_data, judge_score in zip(item_data_list, judge_results):
+        cat_key = item_data["cat_key"]
+        pred = item_data["pred"]
+        ref = item_data["ref"]
+        item = item_data["item"]
+
+        # If not using LLM judge, get correct field from item
+        if not use_llm_judge:
+            correct_val = item.get("correct")
+            judge_score = 1.0 if correct_val is True else (0.0 if correct_val is False else float(correct_val)) if correct_val is not None else None
 
         # 计算指标
         f1_score = compute_f1(pred, ref)
@@ -372,13 +602,24 @@ def process_halumem_dir(dir_path: str):
 
 if __name__ == "__main__":
     # 配置你的 JSON 数据文件路径
+    run_dir("./token_consumption", "locomo")
+    run_dir("./token_consumption", "longmemeval")
+    run_dir("./token_consumption_GLM-4.5-Air", "locomo")
+    run_dir("./token_consumption_GLM-4.5-Air", "longmemeval")
+    run_dir("./token_consumption_GLM-4.5-Air", "locomo")
+    run_dir("./token_consumption_GLM-4.5-Air", "longmemeval")
     tasks = [
-        # ("./results/longmemeval_result.json", "longmemeval"),
-        ("./results_Kimi-K2.6/locomo_result.json", "locomo"),
+        ("./results/locomo_result.json", "locomo-qwen3"),
+        ("./results_GLM-4.5-Air/locomo_result.json", "locomo-glm"),
+        ("./results_Kimi-K2.6/locomo_result.json", "locomo-kimi"),
+        ("./results/longmemeval_result.json", "longmemeval-qwen3"),
+        ("./results_GLM-4.5-Air/longmemeval_result.json", "longmemeval-glm"),
+        ("./results_Kimi-K2.6/longmemeval_result.json", "longmemeval-kimi"),
     ]
 
+    max_workers = int(os.environ.get("LLM_JUDGE_MAX_WORKERS", "32"))
     for file_path, name in tasks:
-        process_eval_file(file_path, name)
+        process_eval_file(file_path, name, use_llm_judge=True, max_workers=max_workers)
 
     # 处理 HALUMEM 结果目录
-    process_halumem_dir("./results_memoryos_halumem")
+    # process_halumem_dir("./results_memoryos_halumem")

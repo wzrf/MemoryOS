@@ -11,11 +11,6 @@ import threading
 embedding_lock = threading.Lock()
 
 
-gpt_client = OpenAI(
-        api_key='sk-11ce7640e46049a6977c0d96ba855ffb',
-        base_url = 'http://127.0.0.1:30004/v1/'  ## qwen3
-        # base_url = 'http://127.0.0.1:30003/v1/' ## kimi
-)
 def get_timestamp():
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
@@ -43,9 +38,13 @@ def normalize_vector(vec):
     return vec / norm
 
 class OpenAIClient:
-    def __init__(self, api_key, base_url, recomputation_rate: float, sglang_url_prefiller: str, sglang_url: str):
+    def __init__(self, api_key, base_url, recomputation_rate: float, sglang_url_prefiller: str="", sglang_url: str=""):
         self.api_key = api_key
         self.base_url = base_url
+        self.gpt_client = OpenAI(
+            api_key='sk-dummy',
+            base_url=base_url
+        )
         openai.api_key = self.api_key
         openai.api_base = self.base_url
         self.sglang_url_prefiller = sglang_url_prefiller
@@ -71,7 +70,7 @@ class OpenAIClient:
     def chat_completion(self, model, messages, temperature=0.7, max_tokens=2000):
         model = "qwen3-8b"
         # print("调用 GPT 接口，模型:", model)
-        response = gpt_client.chat.completions.create(
+        response = self.gpt_client.chat.completions.create(
             model=model,
             messages=messages,
             temperature=temperature,
@@ -90,7 +89,7 @@ class OpenAIClient:
     def chat_completion_with_usage(self, model, messages, temperature=0.7, max_tokens=2000):
         model = "qwen3-8b"
         # print("调用 GPT 接口，模型:", model)
-        response = gpt_client.chat.completions.create(
+        response = self.gpt_client.chat.completions.create(
             model=model,
             messages=messages,
             temperature=temperature,

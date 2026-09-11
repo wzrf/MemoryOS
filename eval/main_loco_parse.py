@@ -14,17 +14,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 # import tiktoken
 import os
+import argparse
+
 total_tokens = 0
 num_samples=0
-# Initialize OpenAI client
-client = OpenAIClient(
-    api_key='sk-11ce7640e46049a6977c0d96ba855ffb',
-    # base_url='https://dashscope.aliyuncs.com/compatible-mode/v1'
-    base_url = 'http://127.0.0.1:30004/v1/',
-    recomputation_rate=float(os.environ.get("recomputation_rate")),
-    sglang_url="http://127.0.0.1:30003/v1/completions",
-    sglang_url_prefiller="http://127.0.0.1:30003/v1/completions"
-)
+
 # Heat threshold
 H_THRESHOLD = 5.0
 all_memory_summarize_percentage = []
@@ -285,6 +279,7 @@ def process_single_qa_worker(
     )
     local_mid_mem = MidTermMemory(
         max_capacity=2000, file_path=mid_mem_path,
+        client=client,
         embedding_model=embedding_model
     )
     local_long_mem = LongTermMemory(file_path=long_mem_path, embedding_model=embedding_model)
@@ -515,7 +510,8 @@ def process_single_sample(sample, client, embedding_model, qa_max_workers=5, out
     mid_mem = MidTermMemory(
         max_capacity=2000,
         file_path=f"{mem_dir}/{sample_id}_mid_term.json",
-        embedding_model=embedding_model
+        embedding_model=embedding_model,
+        client=client,
     )
     long_mem = LongTermMemory(
         file_path=f"{mem_dir}/{sample_id}_long_term.json",
@@ -536,7 +532,7 @@ def process_single_sample(sample, client, embedding_model, qa_max_workers=5, out
             if dialog["agent_response"] == start_sign["agent_response"] and dialog["user_input"] == start_sign["user_input"] and dialog["timestamp"] == start_sign["timestamp"]:
                 print(f"already run {start_idx/len(processed_dialogs)}")
                 processed_dialogs = processed_dialogs[start_idx + 1:]
-                save_token_consumption = False ##mengyao_debug 如果是从一半开始build/跳过build 就不写入了
+                # save_token_consumption = False ##mengyao_debug 如果是从一半开始build/跳过build 就不写入了
                 break
 
     for dialog in processed_dialogs:
@@ -574,9 +570,8 @@ def process_single_sample(sample, client, embedding_model, qa_max_workers=5, out
 
     # return #mengyao_debug for summary percentage check.
 
-    if save_token_consumption:
-        with open(f"./{token_consumption_dir}/locomo_{sample_id}.json", "w") as f:
-            json.dump(dynamic_updater.get_stats(), f)
+    with open(f"./{token_consumption_dir}/locomo_{sample_id}.json", "w") as f:
+        json.dump(dynamic_updater.get_stats(), f)
 
 
     # 2. 过滤并并发处理 QA 对
@@ -665,6 +660,8 @@ def main_parallel(sample_max_workers=5, qa_max_workers=5, output_file=""):
                     )
 
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 print(f"样本 {sample_id} 在子线程处理过程中发生错误：{e}")
 
     print(
@@ -673,7 +670,27 @@ def main_parallel(sample_max_workers=5, qa_max_workers=5, output_file=""):
 
 
 if __name__ == "__main__":
-    LLM_MODEL = "Kimi-K2.6"
+    # LLM_MODEL = "Kimi-K2.6"
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--LLM_MODEL', type=str,
+                        help='llm model')
+    parser.add_argument('--API_BASE_URL', type=str,
+                        help='llm model api')
+
+    args = parser.parse_args()
+    LLM_MODEL = args.LLM_MODEL
+    API_BASE_URL = args.API_BASE_URL
+
+    # Initialize OpenAI client
+    client = OpenAIClient(
+        api_key='sk-11ce7640e46049a6977c0d96ba855ffb',
+        # base_url='https://dashscope.aliyuncs.com/compatible-mode/v1'
+        base_url=API_BASE_URL,
+        recomputation_rate=float(os.environ.get("recomputation_rate")),
+        sglang_url="http://127.0.0.1:30003/v1/completions",
+        sglang_url_prefiller="http://127.0.0.1:30003/v1/completions"
+    )
 
     token_consumption_dir = "./token_consumption"
     mem_dir = "mem_tmp_loco"
