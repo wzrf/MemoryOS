@@ -184,7 +184,7 @@ def run_dir(path: str, name: str):
     all_prompt_tokens = []
     all_completion_tokens = []
     for file in json_files:
-        if name in file.name:
+        if name.split("_")[0] in file.name:
             with open(file, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
@@ -196,8 +196,9 @@ def run_dir(path: str, name: str):
             if completion_tokens > 0:
                 all_completion_tokens.append(completion_tokens)
 
-    print(f"{name}: average prompt_tokens: {sum(all_prompt_tokens)/len(all_prompt_tokens)} "
-          f"average completion_tokens: {sum(all_completion_tokens)/len(all_completion_tokens)}")
+    if len(all_prompt_tokens) > 0:
+        print(f"{name}: average prompt_tokens: {sum(all_prompt_tokens)/len(all_prompt_tokens)} "
+              f"average completion_tokens: {sum(all_completion_tokens)/len(all_completion_tokens)}")
 
 
 def simple_tokenize(text):
@@ -310,7 +311,12 @@ def process_eval_file(file_path: str, dataset_name: str, use_llm_judge: bool = F
     global_judge_scores = []
     global_bleus = defaultdict(list)
 
-    # Collect all items data for processing
+
+    if "locomo" in dataset_name.lower():
+        data_list = [x for x in data_list if x["category"] in [1, 2, 3, 4]]
+
+
+    # Collect all items data for processing (only included categories)
     item_data_list = []
     for idx, item in enumerate(data_list):
         # 1. 收集 Token 消耗
@@ -322,7 +328,7 @@ def process_eval_file(file_path: str, dataset_name: str, use_llm_judge: bool = F
             all_completion_tokens.append(c_tok)
 
         # 2. 获取 Category、Prediction、Reference 和 Correct 判定
-        if dataset_name.lower() == "longmemeval":
+        if "longmemeval" in dataset_name.lower():
             cat_key = item.get("question_type", "LongMemEval QA")
             pred = item.get("system_answer", "")
             ref = item.get("golden_answer", "")
@@ -335,7 +341,7 @@ def process_eval_file(file_path: str, dataset_name: str, use_llm_judge: bool = F
         # 获取问题文本
         q_text = item.get("question", cat_key)
 
-        # 存储项数据
+        # 存储项数据 (only for included categories)
         item_data_list.append({
             "idx": idx,
             "cat_key": cat_key,
@@ -602,12 +608,12 @@ def process_halumem_dir(dir_path: str):
 
 if __name__ == "__main__":
     # 配置你的 JSON 数据文件路径
-    run_dir("./token_consumption", "locomo")
-    run_dir("./token_consumption", "longmemeval")
-    run_dir("./token_consumption_GLM-4.5-Air", "locomo")
-    run_dir("./token_consumption_GLM-4.5-Air", "longmemeval")
-    run_dir("./token_consumption_GLM-4.5-Air", "locomo")
-    run_dir("./token_consumption_GLM-4.5-Air", "longmemeval")
+    run_dir("./token_consumption", "locomo_qwen3")
+    run_dir("./token_consumption", "longmemeval_qwen3")
+    run_dir("./token_consumption_GLM-4.5-Air", "locomo_glm")
+    run_dir("./token_consumption_GLM-4.5-Air", "longmemeval_glm")
+    run_dir("./token_consumption_Kimi-K2.6", "locomo_kimi")
+    run_dir("./token_consumption_Kimi-K2.6", "longmemeval_kimi")
     tasks = [
         ("./results/locomo_result.json", "locomo-qwen3"),
         ("./results_GLM-4.5-Air/locomo_result.json", "locomo-glm"),
