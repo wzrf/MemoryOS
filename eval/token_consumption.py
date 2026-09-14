@@ -608,19 +608,19 @@ def process_halumem_dir(dir_path: str):
 
 if __name__ == "__main__":
     # 配置你的 JSON 数据文件路径
-    run_dir("./token_consumption", "locomo_qwen3")
-    run_dir("./token_consumption", "longmemeval_qwen3")
-    run_dir("./token_consumption_GLM-4.5-Air", "locomo_glm")
-    run_dir("./token_consumption_GLM-4.5-Air", "longmemeval_glm")
+    # run_dir("./token_consumption", "locomo_qwen3")
+    # run_dir("./token_consumption", "longmemeval_qwen3")
+    # run_dir("./token_consumption_GLM-4.5-Air", "locomo_glm")
+    # run_dir("./token_consumption_GLM-4.5-Air", "longmemeval_glm")
     run_dir("./token_consumption_Kimi-K2.6", "locomo_kimi")
-    run_dir("./token_consumption_Kimi-K2.6", "longmemeval_kimi")
+    # run_dir("./token_consumption_Kimi-K2.6", "longmemeval_kimi")
     tasks = [
-        ("./results/locomo_result.json", "locomo-qwen3"),
-        ("./results_GLM-4.5-Air/locomo_result.json", "locomo-glm"),
+        # ("./results/locomo_result.json", "locomo-qwen3"),
+        # ("./results_GLM-4.5-Air/locomo_result.json", "locomo-glm"),
         ("./results_Kimi-K2.6/locomo_result.json", "locomo-kimi"),
-        ("./results/longmemeval_result.json", "longmemeval-qwen3"),
-        ("./results_GLM-4.5-Air/longmemeval_result.json", "longmemeval-glm"),
-        ("./results_Kimi-K2.6/longmemeval_result.json", "longmemeval-kimi"),
+        # ("./results/longmemeval_result.json", "longmemeval-qwen3"),
+        # ("./results_GLM-4.5-Air/longmemeval_result.json", "longmemeval-glm"),
+        # ("./results_Kimi-K2.6/longmemeval_result.json", "longmemeval-kimi"),
     ]
 
     max_workers = int(os.environ.get("LLM_JUDGE_MAX_WORKERS", "32"))

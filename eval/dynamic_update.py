@@ -10,11 +10,13 @@ class DynamicUpdate:
         self.topic_similarity_threshold = topic_similarity_threshold
         self.client = client
         self.last_evicted_page = None
+        self.calls = 0
         self.prompt_tokens = 0
         self.completion_tokens = 0
 
     def get_stats(self):
         return {
+            "calls": self.calls,
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
         }
@@ -81,6 +83,7 @@ Assistant: {current_page.get("agent_response", "")}"""]
                 temperature=0.0,
                 max_tokens=10
             )
+        self.calls += 1
         self.prompt_tokens += prompt_tokens
         self.completion_tokens += completion_tokens
 
@@ -158,6 +161,7 @@ Assistant: {current_page.get("agent_response", "")}"""]
                 temperature=0.3,
                 max_tokens=100
             )
+        self.calls += 1
         self.prompt_tokens += prompt_tokens
         self.completion_tokens += completion_tokens
         return content
@@ -243,6 +247,7 @@ Assistant: {current_page.get("agent_response", "")}"""]
         input_text = "\n".join([f"User: {page.get('user_input','')}\n" for page in pages])
         # print("动态更新：调用 GPT 生成多子主题摘要...")
         multi_summary, prompt_tokens, completion_tokens = gpt_generate_multi_summary(input_text, self.client)
+        self.calls += 1
         self.prompt_tokens += prompt_tokens
         self.completion_tokens += completion_tokens
 
@@ -258,6 +263,7 @@ Assistant: {current_page.get("agent_response", "")}"""]
                 pages,  # 传入已经处理好的完整pages
                 self.topic_similarity_threshold
             )
+            self.calls += 1
             self.prompt_tokens += prompt_tokens
             self.completion_tokens += completion_tokens
 

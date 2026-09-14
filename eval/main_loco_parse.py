@@ -49,6 +49,7 @@ def update_user_profile_from_top_segment(mid_mem, long_mem, sample_id, client, d
             old_profile = long_mem.get_raw_user_profile(sample_id)
             
             result, prompt_tokens, completion_tokens = gpt_personality_analysis(un_analyzed, client)
+            dynamic_updater.calls += 1
             new_profile = result["profile"]
             new_private = result["private"]
             assistant_knowledge = result["assistant_knowledge"]
@@ -57,6 +58,7 @@ def update_user_profile_from_top_segment(mid_mem, long_mem, sample_id, client, d
                 updated_profile, prompt_tokens_1, completion_tokens_1 = gpt_update_profile(old_profile, new_profile, client)
                 prompt_tokens += prompt_tokens_1
                 completion_tokens += completion_tokens_1
+                dynamic_updater.calls += 1
             else:
                 updated_profile = new_profile
                 
@@ -231,7 +233,7 @@ import os
 
 
 def filter_qa(qa_list: list):
-    return qa_list[:200]
+    return qa_list
     """过滤 QA 列表"""
     try:
         with open(
