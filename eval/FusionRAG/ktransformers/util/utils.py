@@ -101,7 +101,7 @@ def find_outliers_zscore(data, threshold=2):
     return outliers
 
 def smart_query_selection(attention_scores, doc_len, target_ratio, system_len, device='cpu', smarter=False,
-                          eigenvalue=None, tokenizer=None, input_tokens=None, similarity=0.0, keyword=""):
+                          eigenvalue=None, tokenizer=None, input_tokens=None, similarity=0.0, keyword="")->list[int]:
     """
     Smart Query Selection: 使用连通性分析确保相关 token 群组被完整选中
 
@@ -2075,7 +2075,7 @@ def find_all_substr_needs_recompute(draft_model, draft_model_device, tokenizer, 
                                     passages: list[str], query: str, rate: float, must_choose_token_indices: list[int],
                                     weighted_use_value: bool, weighted_use_kv:bool, reverse_attn=False,
                                     use_local_draft_model=True, draft_model_url="", save_attention_heatmap=False, compare_sim=None, keyword="")\
-        -> Tuple[List[str], List[List[str]], List[int], List[int], List[str]]:
+        -> Tuple[List[str], List[List[str]], List[int], List[int], List[str], list[int]]:
     system_prompt_tokens = tokenizer.encode(system_prompt, add_special_tokens = False)
     passages_with_system_prompt_str_list = [system_prompt]
     passages_with_system_prompt_str_list.extend(passages)
@@ -2194,7 +2194,7 @@ def find_all_substr_needs_recompute(draft_model, draft_model_device, tokenizer, 
         combine_tokens, all_recompute_tokens = highlight_tokens_compare(selected_indices, torch.tensor(full_input_without_query), tokenizer, query=query,
                                     passages_str=passages_with_system_prompt_str_list)
 
-    return combine_tokens, all_recompute_tokens, sorted_index, sorted_index_before_resort, new_passages
+    return combine_tokens, all_recompute_tokens, sorted_index, sorted_index_before_resort, new_passages, selected_indices
 
 
 def find_all_substr_needs_recompute_and_choose_from_copies(draft_model, draft_model_device, tokenizer, system_prompt: str, past_key_values,

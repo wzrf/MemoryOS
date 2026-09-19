@@ -945,7 +945,7 @@ class FusionRAGModel:
                 api_key=self.api_key
             )
         else:
-            recompute_tokens, recompute_tokens_list, sorted_index, sorted_index_before_resort, passages = find_all_substr_needs_recompute(
+            recompute_tokens, recompute_tokens_list, sorted_index, sorted_index_before_resort, passages, selected_indices = find_all_substr_needs_recompute(
                 draft_model=self.draft_model,
                 draft_model_device=self.draft_model_device,
                 tokenizer=self.draft_model_tokenizer,
@@ -963,7 +963,7 @@ class FusionRAGModel:
                 weighted_use_kv=weighted_use_kv
             )
         torch.cuda.empty_cache()
-        return recompute_tokens, recompute_tokens_list, passages, rate, sorted_index, sorted_index_before_resort
+        return recompute_tokens, recompute_tokens_list, passages, rate, sorted_index, sorted_index_before_resort, selected_indices
 
 
     ## mengyao_debug 默认在preprocess的时候 full recomputation

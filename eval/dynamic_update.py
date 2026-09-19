@@ -13,12 +13,14 @@ class DynamicUpdate:
         self.calls = 0
         self.prompt_tokens = 0
         self.completion_tokens = 0
+        self.fusionrag_stats = []
 
     def get_stats(self):
         return {
             "calls": self.calls,
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
+            "fusionrag_stats": self.fusionrag_stats,
         }
 
     def _is_conversation_continuing(self, previous_page, current_page):
@@ -65,19 +67,22 @@ Assistant: {current_page.get("agent_response", "")}"""]
         query_prompt = """
         Continuous?"""
 
-        if os.environ.get("FUSIONRAG", "false").lower() == "true":
-            response, prompt_tokens, completion_tokens = self.client.chat_completion_fusionrag(
+        fusionrag_list[0] = prefix + fusionrag_list[0]
+
+        if os.environ.get("FUSIONRAG", "false").lower() == "true": ##mengyao_debug first call.
+            response, prompt_tokens, completion_tokens, fusionrag_stats = self.client.chat_completion_fusionrag(
                 model="gpt-4o-mini",
                 system_prompt=system_prompt,
                 fusionrag_cache_list=fusionrag_list,
                 query_prompt=query_prompt,
-                prefix=prefix,
+                prefix="",
                 temperature=0.0,
                 max_tokens=10
 
             )
+            fusionrag_stats["reuse_type"] = "reuse_prefill"
         else:
-            response, prompt_tokens, completion_tokens = self.client.chat_completion_with_usage(
+            response, prompt_tokens, completion_tokens, fusionrag_stats = self.client.chat_completion_with_usage(
                 model="gpt-4o-mini",
                 messages=messages,
                 temperature=0.0,
@@ -86,6 +91,7 @@ Assistant: {current_page.get("agent_response", "")}"""]
         self.calls += 1
         self.prompt_tokens += prompt_tokens
         self.completion_tokens += completion_tokens
+        self.fusionrag_stats.append(fusionrag_stats)
 
         return response.strip().lower() == "true"
 
@@ -143,19 +149,20 @@ Assistant: {current_page.get("agent_response", "")}"""]
 """
 
         query_prompt = "Updated Meta-summary:"
-
-        if os.environ.get("FUSIONRAG", "false").lower() == "true":
-            content, prompt_tokens, completion_tokens = self.client.chat_completion_fusionrag(
+        fusionrag_prompt_list[0] = prefix + fusionrag_prompt_list[0]
+        if os.environ.get("FUSIONRAG", "false").lower() == "true":## mengyao_debug 首次调用，不会触发
+            content, prompt_tokens, completion_tokens, fusionrag_stats = self.client.chat_completion_fusionrag(
                 model="qwen3-8b",
                 system_prompt=system_prompt,
-                prefix=prefix,
+                prefix="",
                 fusionrag_cache_list=fusionrag_prompt_list,
                 query_prompt=query_prompt,
                 temperature=0.3,
                 max_tokens=100
             )
+            fusionrag_stats["reuse_type"] = "reuse_prefill"
         else:
-            content, prompt_tokens, completion_tokens = self.client.chat_completion_with_usage(
+            content, prompt_tokens, completion_tokens, fusionrag_stats = self.client.chat_completion_with_usage(
                 model="qwen3-8b",
                 messages=messages,
                 temperature=0.3,
@@ -164,6 +171,7 @@ Assistant: {current_page.get("agent_response", "")}"""]
         self.calls += 1
         self.prompt_tokens += prompt_tokens
         self.completion_tokens += completion_tokens
+        self.fusionrag_stats.append(fusionrag_stats)
         return content
 
 
@@ -246,10 +254,12 @@ Assistant: {current_page.get("agent_response", "")}"""]
         # 3. 将所有用户输入拼接用于主题分析
         input_text = "\n".join([f"User: {page.get('user_input','')}\n" for page in pages])
         # print("动态更新：调用 GPT 生成多子主题摘要...")
-        multi_summary, prompt_tokens, completion_tokens = gpt_generate_multi_summary(input_text, self.client)
+        multi_summary, prompt_tokens, completion_tokens, fusionrag_stats = gpt_generate_multi_summary(input_text, self.client)
+        fusionrag_stats["reuse_type"] = "reuse_prefill"
         self.calls += 1
         self.prompt_tokens += prompt_tokens
         self.completion_tokens += completion_tokens
+        self.fusionrag_stats.append(fusionrag_stats)
 
         # 4. 按主题分组插入中期记忆
         for summary_dict in multi_summary.get("summaries", []):
@@ -257,7 +267,7 @@ Assistant: {current_page.get("agent_response", "")}"""]
             sub_key_words = summary_dict.get("keywords", [])
             
             print(f"动态更新：处理子主题【{summary_dict.get('theme','')}】，插入中期记忆...")
-            prompt_tokens, completion_tokens = self.mid_term_memory.insert_pages_into_session(
+            prompt_tokens, completion_tokens, fusiorag_stats_list = self.mid_term_memory.insert_pages_into_session(
                 sub_summary, 
                 sub_key_words, 
                 pages,  # 传入已经处理好的完整pages
@@ -266,6 +276,7 @@ Assistant: {current_page.get("agent_response", "")}"""]
             self.calls += 1
             self.prompt_tokens += prompt_tokens
             self.completion_tokens += completion_tokens
+            self.fusionrag_stats.extend(fusiorag_stats_list)
 
     def update_long_term(self, user_id, new_profile_data, knowledge_text):
         print("动态更新：更新长期记忆中的用户画像和私有数据...")

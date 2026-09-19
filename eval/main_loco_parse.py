@@ -25,6 +25,7 @@ all_memory_summarize_percentage = []
 all_history_len = []
 all_history_stored_len = []
 all_answer_time = []
+os.environ["OMP_NUM_THREADS"] = "4"
 
 def update_user_profile_from_top_segment(mid_mem, long_mem, sample_id, client, dynamic_updater: DynamicUpdate):
     """
@@ -48,16 +49,18 @@ def update_user_profile_from_top_segment(mid_mem, long_mem, sample_id, client, d
             
             old_profile = long_mem.get_raw_user_profile(sample_id)
             
-            result, prompt_tokens, completion_tokens = gpt_personality_analysis(un_analyzed, client)
+            result, prompt_tokens, completion_tokens, fusionrag_stats_list = gpt_personality_analysis(un_analyzed, client)
             dynamic_updater.calls += 1
             new_profile = result["profile"]
             new_private = result["private"]
             assistant_knowledge = result["assistant_knowledge"]
             
             if old_profile:
-                updated_profile, prompt_tokens_1, completion_tokens_1 = gpt_update_profile(old_profile, new_profile, client)
+                updated_profile, prompt_tokens_1, completion_tokens_1, fusionrag_stats = gpt_update_profile(old_profile, new_profile, client)
+                fusionrag_stats["reuse_type"] = "reuse_decode"
                 prompt_tokens += prompt_tokens_1
                 completion_tokens += completion_tokens_1
+                dynamic_updater.fusionrag_stats.append(fusionrag_stats)
                 dynamic_updater.calls += 1
             else:
                 updated_profile = new_profile
@@ -66,6 +69,7 @@ def update_user_profile_from_top_segment(mid_mem, long_mem, sample_id, client, d
 
             dynamic_updater.prompt_tokens += prompt_tokens
             dynamic_updater.completion_tokens += completion_tokens
+            dynamic_updater.fusionrag_stats.extend(fusionrag_stats_list)
             
             # 修改点：拆分 new_private 并逐个存储
             if new_private and new_private != "- None":
@@ -148,40 +152,51 @@ def generate_system_response_with_meta(query, short_mem, long_mem, retrieval_que
 
     time_start = time.time()
 
-    if os.environ.get("FUSIONRAG", "").lower() == "true":
-        prefix = "Here are the CONTEXT, MEMORY and CHARACTER TRAITS."
-        question = (
-            f"the question is: {query}\n"
-            f"Your task is to answer questions about {speaker_a} or {speaker_b} in an extremely concise manner.\n"
-            f"Please only provide the content of the answer, without including 'answer:'\n"
-            f"For questions that require answering a date or time, strictly follow the format \"15 July 2023\" and provide a specific date whenever possible. For example, if you need to answer \"last year,\" give the specific year of last year rather than just saying \"last year.\" Only provide one year, date, or time, without any extra responses.\n"
-            f"If the question is about the duration, answer in the form of several years, months, or days.\n"
-            f"Generate answers primarily composed of concrete entities, such as Mentoring program, school speech, etc"
-        )
-        fusionrag_list = []
-        history_text_list[0] = f"<CONTEXT>\nRecent conversation between" + history_text_list[0]
-        retrieval_text_list[0] = f"<MEMORY>\nRelevant past conversations:\n" + retrieval_text_list[0]
-        background = f"<CHARACTER TRAITS>\nCharacteristics of {speaker_a}:\n" + background
-        fusionrag_list.extend(history_text_list)
-        fusionrag_list.extend(retrieval_text_list)
-        fusionrag_list.append(background)
-        response, prompt_tokens, completion_tokens = client.chat_completion_fusionrag(
-            model="kimi-k2.6",
-            system_prompt=system_prompt,
-            prefix=prefix,
-            fusionrag_cache_list=fusionrag_list,
-            query_prompt=question,
-        )
+    prefix = "Here are the CONTEXT, MEMORY and CHARACTER TRAITS."
+    question = (
+        f"the question is: {query}\n"
+        f"Your task is to answer questions about {speaker_a} or {speaker_b} in an extremely concise manner.\n"
+        f"Please only provide the content of the answer, without including 'answer:'\n"
+        f"For questions that require answering a date or time, strictly follow the format \"15 July 2023\" and provide a specific date whenever possible. For example, if you need to answer \"last year,\" give the specific year of last year rather than just saying \"last year.\" Only provide one year, date, or time, without any extra responses.\n"
+        f"If the question is about the duration, answer in the form of several years, months, or days.\n"
+        f"Generate answers primarily composed of concrete entities, such as Mentoring program, school speech, etc"
+    )
+    fusionrag_list = []
+    history_text_list[0] = f"<CONTEXT>\nRecent conversation between" + history_text_list[0]
+    retrieval_text_list[0] = f"<MEMORY>\nRelevant past conversations:\n" + retrieval_text_list[0]
+    background = f"<CHARACTER TRAITS>\nCharacteristics of {speaker_a}:\n" + background
+    fusionrag_list.extend(history_text_list)
+    fusionrag_list.extend(retrieval_text_list)
+    fusionrag_list.append(background)
+    question_origin = {
+        "system_prompt": system_prompt,
+        "prefix": prefix,
+        "query_prompt": question,
+        "question" : question,
+        "fusionrag_list": fusionrag_list,
+    }
+    if os.getenv("DUMP_QUESTIONS", "").lower() == "true":
+        response = "dummy"
+        prompt_tokens = completion_tokens = 0
     else:
+        if os.environ.get("FUSIONRAG", "").lower() == "true":
+            response, prompt_tokens, completion_tokens, chat_completion_fusionrag = client.chat_completion_fusionrag(
+                model="kimi-k2.6",
+                system_prompt=system_prompt,
+                prefix=prefix,
+                fusionrag_cache_list=fusionrag_list,
+                query_prompt=question,
+            )
+        else:
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
 
-        response, prompt_tokens, completion_tokens = client.chat_completion_with_usage(model=LLM_MODEL, messages=messages, temperature=0.7, max_tokens=2000)
+            response, prompt_tokens, completion_tokens, _ = client.chat_completion_with_usage(model=LLM_MODEL, messages=messages, temperature=0.7, max_tokens=2000)
     time_answer = time.time() - time_start
-    return response, system_prompt, user_prompt, prompt_tokens, completion_tokens, time_answer
+    return response, system_prompt, user_prompt, prompt_tokens, completion_tokens, time_answer, question_origin
 
 def process_conversation(conversation_data):
     """
@@ -320,7 +335,7 @@ def process_single_qa_worker(
         "evidence": evidence,
     }
 
-    system_answer, system_prompt, user_prompt, prompt_tokens, completion_tokens, time_answer = (
+    system_answer, system_prompt, user_prompt, prompt_tokens, completion_tokens, time_answer, question_origin = (
         generate_system_response_with_meta(
             question,
             local_short_mem,
@@ -340,16 +355,19 @@ def process_single_qa_worker(
 
     print(f"\033[93muser_prompt = {user_prompt}\033[0m")
 
-    aj = AnswerJudge(
-        api_key="sk-11ce7640e46049a6977c0d96ba855ffb",
-        api_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-        model="deepseek-v3.2"
-    )
-    result = aj.judge(
-        question=question,
-        golden_answer=original_answer,
-        generated_answer=system_answer,
-    )
+    if os.getenv("DUMP_QUESTIONS", "").lower() == "true":
+        result = "dummpy"
+    else:
+        aj = AnswerJudge(
+            api_key="sk-11ce7640e46049a6977c0d96ba855ffb",
+            api_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            model="deepseek-v3.2"
+        )
+        result = aj.judge(
+            question=question,
+            golden_answer=original_answer,
+            generated_answer=system_answer,
+        )
 
 
     return qa_idx, {
@@ -365,6 +383,7 @@ def process_single_qa_worker(
         "evidence": evidence,
         "timestamp": get_timestamp(),
         "time_answer": time_answer,
+        "question_origin": question_origin,
         "correct": result.lower() == "correct",
     }
 
@@ -534,15 +553,16 @@ def process_single_sample(sample, client, embedding_model, qa_max_workers=5, out
             if dialog["agent_response"] == start_sign["agent_response"] and dialog["user_input"] == start_sign["user_input"] and dialog["timestamp"] == start_sign["timestamp"]:
                 print(f"already run {start_idx/len(processed_dialogs)}")
                 processed_dialogs = processed_dialogs[start_idx + 1:]
-                # save_token_consumption = False ##mengyao_debug 如果是从一半开始build/跳过build 就不写入了
+                save_token_consumption = False ##mengyao_debug 如果是从一半开始build/跳过build 就不写入了
                 break
 
-    for dialog in processed_dialogs:
-        short_mem.add_qa_pair(dialog)
-        if short_mem.is_full():
-            dynamic_updater.bulk_evict_and_update_mid_term()
-        update_user_profile_from_top_segment(mid_mem, long_mem, sample_id, client, dynamic_updater)
-        dynamic_updater.get_stats()
+    if len(processed_dialogs) > 0:
+        for dialog in processed_dialogs:
+            short_mem.add_qa_pair(dialog)
+            if short_mem.is_full():
+                dynamic_updater.bulk_evict_and_update_mid_term()
+            update_user_profile_from_top_segment(mid_mem, long_mem, sample_id, client, dynamic_updater)
+            dynamic_updater.get_stats()
 
     history_stored_text = ""
     memory_short = " ".join([m["user_input"] + " " + m["agent_response"] for m in short_mem.memory])
@@ -572,8 +592,9 @@ def process_single_sample(sample, client, embedding_model, qa_max_workers=5, out
 
     # return #mengyao_debug for summary percentage check.
 
-    with open(f"./{token_consumption_dir}/locomo_{sample_id}.json", "w") as f:
-        json.dump(dynamic_updater.get_stats(), f)
+    if save_token_consumption:
+        with open(f"./{token_consumption_dir}/locomo_{sample_id}.json", "w") as f:
+            json.dump(dynamic_updater.get_stats(), f)
 
 
     # 2. 过滤并并发处理 QA 对
@@ -629,10 +650,7 @@ def main_parallel(sample_max_workers=5, qa_max_workers=5, output_file=""):
     if not os.path.exists(model_path):
         model_path = "all-MiniLM-L6-v2"
 
-    device_ = "cuda"
-    if any(sub in LLM_MODEL.lower() for sub in ["kimi", "deepseek"]):
-        device_ = "cpu"
-
+    device_ = "cpu"
     embedding_model = SentenceTransformer(model_path, device=device_)
 
     # 创建锁用于保护结果文件写入
@@ -690,35 +708,42 @@ if __name__ == "__main__":
         # base_url='https://dashscope.aliyuncs.com/compatible-mode/v1'
         base_url=API_BASE_URL,
         recomputation_rate=float(os.environ.get("recomputation_rate")),
-        sglang_url="http://127.0.0.1:30003/v1/completions",
-        sglang_url_prefiller="http://127.0.0.1:30003/v1/completions"
+        sglang_url=f"{API_BASE_URL}/completions",
+        sglang_url_prefiller=f"{API_BASE_URL}/completions"
     )
 
     token_consumption_dir = "./token_consumption"
     mem_dir = "mem_tmp_loco"
     result_dir = "./results"
+    if os.getenv("DUMP_QUESTIONS", "").lower() == "true":
+        result_dir += "_dump_questions"
     fusionrag_tag = os.environ.get("FUSIONRAG", "false").lower()
     result_file = f"{result_dir}/locomo_result.json"
-
-    if fusionrag_tag == "true":
-        mem_dir += "_fusionrag"
-        token_consumption_dir += "_fusionrag"
-        result_file = f"{result_dir}/locomo_result_fusionrag.json"
 
 
     if LLM_MODEL.lower() != "qwen3-8b":
         mem_dir += f"_{LLM_MODEL}"
         token_consumption_dir += f"_{LLM_MODEL}"
         result_dir += f"_{LLM_MODEL}"
-        result_file = f"{result_dir}/locomo_result.json"
-        if fusionrag_tag == "true":
-            result_file = f"{result_dir}/locomo_result_fusionrag.json"
+
+    if fusionrag_tag == "true":
+        mem_dir += "_fusionrag"
+        token_consumption_dir += "_fusionrag"
+        result_dir += f"_fusionrag"
+
+    result_file = f"{result_dir}/locomo_result.json"
+
     os.makedirs(mem_dir, exist_ok=True)
     os.makedirs(token_consumption_dir, exist_ok=True)
     os.makedirs(result_dir, exist_ok=True)
 
+    print(f"mem_dir: {mem_dir}")
+    print(f"token_consumption_dir: {token_consumption_dir}")
+    print(f"result_dir: {result_dir}")
+    print(f"result file: {result_file}")
+
     MAX_WORKERS = 10
-    qa_max_workers = 8
+    qa_max_workers = 32
     if os.environ.get("DEBUG") == "1":
         MAX_WORKERS = 1
         qa_max_workers = 1

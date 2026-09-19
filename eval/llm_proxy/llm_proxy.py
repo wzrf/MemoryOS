@@ -8,9 +8,15 @@ import uvicorn
 app = FastAPI()
 
 BACKENDS = [
-    "http://127.0.0.1:30003",
-    "http://127.0.0.1:30013",
+    "http://127.0.0.1:20001",
+    "http://127.0.0.1:20002",
+    "http://127.0.0.1:20003",
+    "http://127.0.0.1:20004",
+    "http://127.0.0.1:20005",
+    "http://127.0.0.1:20006",
 ]
+
+print(f"BACKENDS: {BACKENDS}")
 
 backend_cycle = itertools.cycle(BACKENDS)
 
@@ -59,6 +65,6 @@ if __name__ == "__main__":
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=30033,
+        port=20000,
         workers=1,
     )
