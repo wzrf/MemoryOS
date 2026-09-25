@@ -62,11 +62,21 @@ def build_memory_for_sample(sample, embedding_model):
     sample_id = sample.get("question_id", "unknown_id")
     sessions = sample.get("haystack_sessions", [])
     dates = sample.get("haystack_dates", [])
-    print(f"len(sessions): {len(sessions)}, len(dates): {len(dates)}")
+    token_consumption_path = f"{TOKEN_CONSUMPTION_DIR}/longmemeval_{sample_id}.json"
+    if os.path.exists(token_consumption_path):
+        print(f"[{sample_id}] already built, skip.")
+        return
+
+    print(f"[{sample_id}] building...")
 
     short_mem_path = f"{MEM_DIR}/{sample_id}_short_term.json"
     mid_mem_path = f"{MEM_DIR}/{sample_id}_mid_term.json"
     long_mem_path = f"{MEM_DIR}/{sample_id}_long_term.json"
+
+    for path in [short_mem_path, mid_mem_path, long_mem_path]:
+        if os.path.exists(path):
+            os.remove(path)
+            print(f"[{sample_id}] removed old memory file: {path}")
 
     short_mem = ShortTermMemory(max_capacity=5, file_path=short_mem_path)
     mid_mem = MidTermMemory(max_capacity=2000, file_path=mid_mem_path, embedding_model=embedding_model, client=client)
@@ -80,28 +90,17 @@ def build_memory_for_sample(sample, embedding_model):
         s_date = dates[idx] if idx < len(dates) else ""
         dialogs.extend(parse_session_dialogs(msgs, s_date))
 
-    save_token_consumption = True
-    if len(short_mem.memory) > 0:
-        start_sign = short_mem.memory[-1]
-        for start_idx, dialog in enumerate(dialogs):
-            if dialog["agent_response"] == start_sign["agent_response"] and dialog["user_input"] == start_sign["user_input"] and dialog["timestamp"] == start_sign["timestamp"]:
-                print(f"already finished {start_idx/len(dialogs)*100}%")
-                dialogs = dialogs[start_idx + 1:]
-                save_token_consumption = False ##mengyao_debug 如果是从一半开始build/跳过build 就不写入了
-                break
-
-
         # 2. 依次写入记忆系统
-    for dialog in dialogs:
+    for d_idx, dialog in enumerate(dialogs):
         short_mem.add_qa_pair(dialog)
         if short_mem.is_full():
             dynamic_updater.bulk_evict_and_update_mid_term()
         update_user_profile_from_top_segment(mid_mem, long_mem, sample_id, client, dynamic_updater)
         dynamic_updater.get_stats()
+        print(f"sample [{sample_id}] finished {d_idx + 1} / {len(dialogs)}")
 
-    if save_token_consumption:
-        with open(f"{TOKEN_CONSUMPTION_DIR}/longmemeval_{sample_id}.json", "w") as f:
-            json.dump(dynamic_updater.get_stats(), f)
+    with open(token_consumption_path, "w") as f:
+        json.dump(dynamic_updater.get_stats(), f)
 
     return short_mem, mid_mem, long_mem, dynamic_updater
 
@@ -145,13 +144,17 @@ def generate_system_response_longmemeval(query, query_date, short_mem, long_mem,
         {"role": "user", "content": user_prompt}
     ]
 
-    response, prompt_tokens, completion_tokens = client_inst.chat_completion_with_usage(
+    response, prompt_tokens, completion_tokens, _ = client_inst.chat_completion_with_usage(
         model="qwen3-8b", messages=messages, temperature=0.7, max_tokens=2000
     )
     return response, system_prompt, user_prompt, prompt_tokens, completion_tokens
 
 
 def answer_single_sample(sample, embedding_model=None):
+
+    if os.environ.get("SKIP_ANSWER", "false").lower() == "true":
+        return None
+
     """Answer 阶段：检索并解答。"""
     sample_id = sample.get("question_id", "unknown_id")
     question = sample.get("question", "")
@@ -199,11 +202,14 @@ def answer_single_sample(sample, embedding_model=None):
         api_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         model="deepseek-v3.2"
     )
-    judge_res = aj.judge(
-        question=question,
-        golden_answer=golden_answer,
-        generated_answer=sys_answer,
-    )
+    try:
+        judge_res = aj.judge(
+            question=question,
+            golden_answer=golden_answer,
+            generated_answer=sys_answer,
+        )
+    except Exception as e:
+        judge_res = ""
 
     return {
         "question_id": sample_id,
@@ -234,7 +240,7 @@ def process_single_longmemeval_sample(sample, embedding_model):
         # 2. 检索并解答
         res = answer_single_sample(sample, embedding_model=embedding_model)
 
-        print(f"✅ Sample [{sample_id}] 处理完成 | 预测: '{res['system_answer']}' | 正确: {res['correct']}")
+        # print(f"✅ Sample [{sample_id}] 处理完成 | 预测: '{res['system_answer']}' | 正确: {res['correct']}")
         return res
     except Exception as e:
         print(f"❌ Sample [{sample_id}] 处理失败: {e}")
@@ -333,7 +339,7 @@ if __name__ == "__main__":
         # sglang_url_prefiller="http://127.0.0.1:30003/v1/completions"
     )
 
-    MAX_WORKERS = 32
+    MAX_WORKERS = 96
     if os.environ.get("DEBUG") == "1":
         MAX_WORKERS = 1
 
@@ -342,7 +348,7 @@ if __name__ == "__main__":
     RESULT_DIR = "results"
     TOKEN_CONSUMPTION_DIR = "token_consumption"
 
-    if LLM_MODEL.lower() != "qwen3_8b":
+    if LLM_MODEL.lower() not in ["qwen3-8b", "qwen3_8b"]:
         MEM_DIR = f"{MEM_DIR}_{LLM_MODEL}"
         RESULT_DIR = f"{RESULT_DIR}_{LLM_MODEL}"
         TOKEN_CONSUMPTION_DIR = f"{TOKEN_CONSUMPTION_DIR}_{LLM_MODEL}"

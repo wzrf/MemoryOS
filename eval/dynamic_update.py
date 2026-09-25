@@ -11,6 +11,7 @@ class DynamicUpdate:
         self.client = client
         self.last_evicted_page = None
         self.calls = 0
+        self.radix_cache = []
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.fusionrag_stats = []
@@ -18,6 +19,7 @@ class DynamicUpdate:
     def get_stats(self):
         return {
             "calls": self.calls,
+            "radix_cache": self.radix_cache,
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "fusionrag_stats": self.fusionrag_stats,
@@ -89,6 +91,7 @@ Assistant: {current_page.get("agent_response", "")}"""]
                 max_tokens=10
             )
         self.calls += 1
+        self.radix_cache.append(system_prompt + prefix)
         self.prompt_tokens += prompt_tokens
         self.completion_tokens += completion_tokens
         self.fusionrag_stats.append(fusionrag_stats)
@@ -169,6 +172,7 @@ Assistant: {current_page.get("agent_response", "")}"""]
                 max_tokens=100
             )
         self.calls += 1
+        self.radix_cache.append(prefix + system_prompt)
         self.prompt_tokens += prompt_tokens
         self.completion_tokens += completion_tokens
         self.fusionrag_stats.append(fusionrag_stats)
@@ -254,9 +258,10 @@ Assistant: {current_page.get("agent_response", "")}"""]
         # 3. 将所有用户输入拼接用于主题分析
         input_text = "\n".join([f"User: {page.get('user_input','')}\n" for page in pages])
         # print("动态更新：调用 GPT 生成多子主题摘要...")
-        multi_summary, prompt_tokens, completion_tokens, fusionrag_stats = gpt_generate_multi_summary(input_text, self.client)
+        multi_summary, prompt_tokens, completion_tokens, fusionrag_stats, prefix_ = gpt_generate_multi_summary(input_text, self.client)
         fusionrag_stats["reuse_type"] = "reuse_prefill"
         self.calls += 1
+        self.radix_cache.append(prefix_)
         self.prompt_tokens += prompt_tokens
         self.completion_tokens += completion_tokens
         self.fusionrag_stats.append(fusionrag_stats)
@@ -267,7 +272,7 @@ Assistant: {current_page.get("agent_response", "")}"""]
             sub_key_words = summary_dict.get("keywords", [])
             
             print(f"动态更新：处理子主题【{summary_dict.get('theme','')}】，插入中期记忆...")
-            prompt_tokens, completion_tokens, fusiorag_stats_list = self.mid_term_memory.insert_pages_into_session(
+            prompt_tokens, completion_tokens, fusiorag_stats_list, radix_cache_list = self.mid_term_memory.insert_pages_into_session(
                 sub_summary, 
                 sub_key_words, 
                 pages,  # 传入已经处理好的完整pages
@@ -276,6 +281,7 @@ Assistant: {current_page.get("agent_response", "")}"""]
             self.calls += 1
             self.prompt_tokens += prompt_tokens
             self.completion_tokens += completion_tokens
+            self.radix_cache.extend(radix_cache_list)
             self.fusionrag_stats.extend(fusiorag_stats_list)
 
     def update_long_term(self, user_id, new_profile_data, knowledge_text):

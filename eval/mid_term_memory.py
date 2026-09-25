@@ -79,10 +79,12 @@ class MidTermMemory:
         summary_vec = get_embedding_with_model(summary, self.embedding_model)
         summary_vec = normalize_vector(summary_vec).tolist()
         fusiorag_stats_list = []
-        summary_keywords, prompt_tokens, completion_tokens, fusiorag_stats = llm_extract_keywords(summary, client=self.client)
+        radix_cache_list = []
+        summary_keywords, prompt_tokens, completion_tokens, fusiorag_stats, radix_cache = llm_extract_keywords(summary, client=self.client)
         fusiorag_stats["reuse_type"] = "reuse_decode"
         summary_keywords = list(summary_keywords)
         fusiorag_stats_list.append(fusiorag_stats)
+        radix_cache_list.append(radix_cache)
         
         new_details = []
         for page in details:
@@ -91,9 +93,10 @@ class MidTermMemory:
             full_text = f"User: {page.get('user_input','')} Assiant: {page.get('agent_response','')}"
             inp_vec = get_embedding_with_model(full_text, self.embedding_model)
             inp_vec = normalize_vector(inp_vec).tolist()
-            page_keywords, prompt_tokens_, completion_tokens_, fusiorag_stats_ = llm_extract_keywords(full_text, client=self.client)
+            page_keywords, prompt_tokens_, completion_tokens_, fusiorag_stats_, radix_cache = llm_extract_keywords(full_text, client=self.client)
             fusiorag_stats_["reuse_type"] = "reuse_prefill"
             fusiorag_stats_list.append(fusiorag_stats_)
+            radix_cache_list.append(radix_cache)
             prompt_tokens += prompt_tokens_
             completion_tokens += completion_tokens_
             page_keywords = list(page_keywords)
@@ -127,7 +130,7 @@ class MidTermMemory:
         if len(self.sessions) > self.max_capacity:
             self.evict_lfu()
         self.save()
-        return session_id, prompt_tokens, completion_tokens, fusiorag_stats_list
+        return session_id, prompt_tokens, completion_tokens, fusiorag_stats_list, radix_cache_list
 
     def rebuild_heap(self):
         self.heap = [(-session["H_segment"], sid) for sid, session in self.sessions.items()]
@@ -139,6 +142,7 @@ class MidTermMemory:
         new_keywords = keyworks
         prompt_tokens = 0
         completion_tokens = 0
+        radix_cache_list = []
         
         best_sid = None
         best_sim = -1
@@ -180,10 +184,10 @@ class MidTermMemory:
                 session["timestamp"] = get_timestamp()
             else:
                 print("中期记忆：综合得分不足，新增会话段。")
-                _, prompt_tokens, completion_tokens, fusiorag_stats_list = self.add_session(summary, pages)
+                _, prompt_tokens, completion_tokens, fusiorag_stats_list, radix_cache_list = self.add_session(summary, pages)
         else:
             print("中期记忆：无相似会话段，新建会话段。")
-            _, prompt_tokens, completion_tokens, fusiorag_stats_list = self.add_session(summary, pages)
+            _, prompt_tokens, completion_tokens, fusiorag_stats_list, radix_cache_list = self.add_session(summary, pages)
         
         if best_sid is not None and best_sid in self.sessions:
             session = self.sessions[best_sid]
@@ -192,7 +196,7 @@ class MidTermMemory:
         
         self.rebuild_heap()
         self.save()
-        return prompt_tokens, completion_tokens, fusiorag_stats_list
+        return prompt_tokens, completion_tokens, fusiorag_stats_list, radix_cache_list
 
 
     def search_sessions_by_summary(self, query, client, embedding_model, segment_threshold=0.8, page_threshold=0.7, top_k=5, tau=3600, gamma=0.5, alpha=1.0):
@@ -210,7 +214,7 @@ class MidTermMemory:
         query_arr = np.array([query_vec], dtype=np.float32)
         distances, indices = index.search(query_arr, top_k)
         
-        query_keywords, prompt_tokens, completion_tokens, fusiorag_stats = llm_extract_keywords(query, client)
+        query_keywords, prompt_tokens, completion_tokens, fusiorag_stats, _ = llm_extract_keywords(query, client)
         current_time = datetime.now()
         results = []
         

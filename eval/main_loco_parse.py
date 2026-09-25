@@ -180,6 +180,7 @@ def generate_system_response_with_meta(query, short_mem, long_mem, retrieval_que
         prompt_tokens = completion_tokens = 0
     else:
         if os.environ.get("FUSIONRAG", "").lower() == "true":
+            fusionrag_list = fusionrag_list[:12]
             response, prompt_tokens, completion_tokens, chat_completion_fusionrag = client.chat_completion_fusionrag(
                 model="kimi-k2.6",
                 system_prompt=system_prompt,
@@ -488,6 +489,88 @@ def process_single_sample(sample, client, embedding_model, qa_max_workers=5, out
     conversation_data = sample.get("conversation", {})
     qa_pairs = sample.get("qa", [])
 
+    processed_dialogs = process_conversation(conversation_data)
+    processed_dialogs_text = " ".join([x["user_input"] + " " + x["agent_response"] for x in processed_dialogs])
+    if not processed_dialogs:
+        print(f"样本 {sample_id} 没有有效的对话数据，跳过")
+        return []
+
+    token_consumption_path = f"./{token_consumption_dir}/locomo_{sample_id}.json"
+    if os.path.exists(token_consumption_path):
+        print(f"[{sample_id}] already built, skip.")
+    else:
+        short_mem_path = f"{mem_dir}/{sample_id}_short_term.json"
+        mid_mem_path = f"{mem_dir}/{sample_id}_mid_term.json"
+        long_mem_path = f"{mem_dir}/{sample_id}_long_term.json"
+        for path in [short_mem_path, mid_mem_path, long_mem_path]:
+            if os.path.exists(path):
+                os.remove(path)
+                print(f"[{sample_id}] removed old memory file: {path}")
+
+        speaker_a = conversation_data.get("speaker_a")
+        speaker_b = conversation_data.get("speaker_b")
+
+        # 1. 初始化记忆模块并顺序写入对话历史（写入过程需保持时序）
+        short_mem = ShortTermMemory(
+            max_capacity=5,
+            file_path=short_mem_path,
+        )
+        mid_mem = MidTermMemory(
+            max_capacity=2000,
+            file_path=mid_mem_path,
+            embedding_model=embedding_model,
+            client=client,
+        )
+        long_mem = LongTermMemory(
+            file_path=long_mem_path,
+            embedding_model=embedding_model
+        )
+        dynamic_updater = DynamicUpdate(
+            short_mem,
+            mid_mem,
+            long_mem,
+            topic_similarity_threshold=0.6,
+            client=client,
+        )
+
+        for d_idx, dialog in enumerate(processed_dialogs):
+            short_mem.add_qa_pair(dialog)
+            if short_mem.is_full():
+                dynamic_updater.bulk_evict_and_update_mid_term()
+            update_user_profile_from_top_segment(mid_mem, long_mem, sample_id, client, dynamic_updater)
+            dynamic_updater.get_stats()
+            print(f"sample [{sample_id}] finished {d_idx+1} / {len(processed_dialogs)}")
+
+        history_stored_text = ""
+        memory_short = " ".join([m["user_input"] + " " + m["agent_response"] for m in short_mem.memory])
+        memory_mid = " ".join([v["summary"] for k, v in mid_mem.sessions.items()])
+        for _, session in mid_mem.sessions.items():
+            for detail in session["details"]:
+                if detail["meta_info"] not in memory_mid:
+                    memory_mid += detail["meta_info"]
+                if detail["user_input"] not in history_stored_text:
+                    history_stored_text += detail["user_input"]
+                if detail["agent_response"] not in history_stored_text:
+                    history_stored_text += detail["agent_response"]
+
+        memory_long = " ".join([v["data"] for k, v in long_mem.user_profiles.items()])
+        all_memory = memory_short + memory_mid + memory_long
+
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained("/mnt/qjhs-sh-lab-01/models/Qwen3-8B", trust_remote_code=True)
+        all_summary = tokenizer.encode(all_memory, add_special_tokens=True)
+        all_history = tokenizer.encode(processed_dialogs_text, add_special_tokens=True)
+        history_stored = tokenizer.encode(history_stored_text, add_special_tokens=True) ## history_stored 是存储起来的对话，这里就是检验一下是否存储了全部的对话
+        all_memory_summarize_percentage.append(len(all_summary)/len(all_history))
+        all_history_len.append(len(all_history))
+        all_history_stored_len.append(len(history_stored))
+
+        print(f"summarize percentage: {sum(all_memory_summarize_percentage)/len(all_memory_summarize_percentage)} all_history_len={sum(all_history_len)} all_history_stored_len={sum(all_history_stored_len)}")
+
+        with open(token_consumption_path, "w") as f:
+            json.dump(dynamic_updater.get_stats(), f, indent=4)
+
+
     # 如果提供了输出文件，则加载已有结果，跳过已处理的问题
     if output_file and os.path.exists(output_file):
         try:
@@ -513,88 +596,6 @@ def process_single_sample(sample, client, embedding_model, qa_max_workers=5, out
                 print(f"样本 {sample_id}: 结果文件为空，将处理所有问题")
         except (json.JSONDecodeError, KeyError, Exception) as e:
             print(f"样本 {sample_id}: 读取结果文件时出错 {output_file}: {e}，将处理所有问题")
-
-    processed_dialogs = process_conversation(conversation_data)
-    processed_dialogs_text = " ".join([x["user_input"] + " " + x["agent_response"] for x in processed_dialogs])
-    if not processed_dialogs:
-        print(f"样本 {sample_id} 没有有效的对话数据，跳过")
-        return []
-
-    speaker_a = conversation_data.get("speaker_a")
-    speaker_b = conversation_data.get("speaker_b")
-
-    # 1. 初始化记忆模块并顺序写入对话历史（写入过程需保持时序）
-    short_mem = ShortTermMemory(
-        max_capacity=5,
-        file_path=f"{mem_dir}/{sample_id}_short_term.json",
-    )
-    mid_mem = MidTermMemory(
-        max_capacity=2000,
-        file_path=f"{mem_dir}/{sample_id}_mid_term.json",
-        embedding_model=embedding_model,
-        client=client,
-    )
-    long_mem = LongTermMemory(
-        file_path=f"{mem_dir}/{sample_id}_long_term.json",
-        embedding_model=embedding_model
-    )
-    dynamic_updater = DynamicUpdate(
-        short_mem,
-        mid_mem,
-        long_mem,
-        topic_similarity_threshold=0.6,
-        client=client,
-    )
-
-    save_token_consumption = True
-    if len(short_mem.memory) > 0:
-        start_sign = short_mem.memory[-1]
-        for start_idx, dialog in enumerate(processed_dialogs):
-            if dialog["agent_response"] == start_sign["agent_response"] and dialog["user_input"] == start_sign["user_input"] and dialog["timestamp"] == start_sign["timestamp"]:
-                print(f"already run {start_idx/len(processed_dialogs)}")
-                processed_dialogs = processed_dialogs[start_idx + 1:]
-                save_token_consumption = False ##mengyao_debug 如果是从一半开始build/跳过build 就不写入了
-                break
-
-    if len(processed_dialogs) > 0:
-        for dialog in processed_dialogs:
-            short_mem.add_qa_pair(dialog)
-            if short_mem.is_full():
-                dynamic_updater.bulk_evict_and_update_mid_term()
-            update_user_profile_from_top_segment(mid_mem, long_mem, sample_id, client, dynamic_updater)
-            dynamic_updater.get_stats()
-
-    history_stored_text = ""
-    memory_short = " ".join([m["user_input"] + " " + m["agent_response"] for m in short_mem.memory])
-    memory_mid = " ".join([v["summary"] for k, v in mid_mem.sessions.items()])
-    for _, session in mid_mem.sessions.items():
-        for detail in session["details"]:
-            if detail["meta_info"] not in memory_mid:
-                memory_mid += detail["meta_info"]
-            if detail["user_input"] not in history_stored_text:
-                history_stored_text += detail["user_input"]
-            if detail["agent_response"] not in history_stored_text:
-                history_stored_text += detail["agent_response"]
-
-    memory_long = " ".join([v["data"] for k, v in long_mem.user_profiles.items()])
-    all_memory = memory_short + memory_mid + memory_long
-
-    from transformers import AutoTokenizer
-    tokenizer = AutoTokenizer.from_pretrained("/mnt/qjhs-sh-lab-01/models/Qwen3-8B", trust_remote_code=True)
-    all_summary = tokenizer.encode(all_memory, add_special_tokens=True)
-    all_history = tokenizer.encode(processed_dialogs_text, add_special_tokens=True)
-    history_stored = tokenizer.encode(history_stored_text, add_special_tokens=True) ## history_stored 是存储起来的对话，这里就是检验一下是否存储了全部的对话
-    all_memory_summarize_percentage.append(len(all_summary)/len(all_history))
-    all_history_len.append(len(all_history))
-    all_history_stored_len.append(len(history_stored))
-
-    print(f"summarize percentage: {sum(all_memory_summarize_percentage)/len(all_memory_summarize_percentage)} all_history_len={sum(all_history_len)} all_history_stored_len={sum(all_history_stored_len)}")
-
-    # return #mengyao_debug for summary percentage check.
-
-    if save_token_consumption:
-        with open(f"./{token_consumption_dir}/locomo_{sample_id}.json", "w") as f:
-            json.dump(dynamic_updater.get_stats(), f)
 
 
     # 2. 过滤并并发处理 QA 对
@@ -650,7 +651,7 @@ def main_parallel(sample_max_workers=5, qa_max_workers=5, output_file=""):
     if not os.path.exists(model_path):
         model_path = "all-MiniLM-L6-v2"
 
-    device_ = "cpu"
+    device_ = "cuda:1"
     embedding_model = SentenceTransformer(model_path, device=device_)
 
     # 创建锁用于保护结果文件写入

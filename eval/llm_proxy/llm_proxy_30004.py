@@ -8,10 +8,9 @@ import uvicorn
 app = FastAPI()
 
 BACKENDS = [
-    "http://127.0.0.1:20000",
-    "http://127.0.0.1:20001",
-    "http://127.0.0.1:20002",
-    "http://127.0.0.1:20003",
+    "http://192.168.0.237:30004",
+    "http://192.168.0.238:30004",
+    # "http://192.168.0.239:30004",
 ]
 
 print(f"BACKENDS: {BACKENDS}")
@@ -21,8 +20,8 @@ backend_cycle = itertools.cycle(BACKENDS)
 client = httpx.AsyncClient(
     timeout=None,
     limits=httpx.Limits(
-        max_connections=20000,
-        max_keepalive_connections=20000,
+        max_connections=2000,
+        max_keepalive_connections=2000,
     ),
 )
 
@@ -63,6 +62,6 @@ if __name__ == "__main__":
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=20010,
+        port=30004,
         workers=1,
     )

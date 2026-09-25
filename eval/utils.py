@@ -62,7 +62,7 @@ class OpenAIClient:
             draft_model_name="qwen2.5-3b",
             preprocess_model_path="/data2/qy_tmp/xumengyao/bge-m3",
             draft_model_path=draft_model_path,
-            draft_model_url="http://192.168.0.238:30005/v1/completions",
+            draft_model_url="http://127.0.0.1:30015/v1/completions",
             apikey="xxx",
             use_local_draft_model=False,
         )
@@ -287,17 +287,22 @@ def gpt_generate_multi_summary(text, client):
               "Each summary should include the subtopic name, keywords (separated by commas), and the summary text, formatted as a JSON array, with an example format as follows:\n"
               "[\n  {\"theme\": \"Business trip\", \"keywords\": [\"Business trip\", \"Itinerary\", \"Work\"], \"content\": \" User mentioned the troubles related to business trips.\"},\n  {\"theme\": \"Health\", \"keywords\": [\"Cold\", \"Uncomfortable\", \"Sick\"], \"content\": \"User reported feeling unwell due to a cold.\"}\n]\n"
               "Please directly output the JSON array, without adding any other content.\n\Conversation content:\n" + text)
+    prompt_prefix = ("Please analyze the following dialogue and generate multiple subtopic summaries (if applicable), with a maximum of two themes.\n"
+              "Each summary should include the subtopic name, keywords (separated by commas), and the summary text, formatted as a JSON array, with an example format as follows:\n"
+              "[\n  {\"theme\": \"Business trip\", \"keywords\": [\"Business trip\", \"Itinerary\", \"Work\"], \"content\": \" User mentioned the troubles related to business trips.\"},\n  {\"theme\": \"Health\", \"keywords\": [\"Cold\", \"Uncomfortable\", \"Sick\"], \"content\": \"User reported feeling unwell due to a cold.\"}\n]\n"
+              "Please directly output the JSON array, without adding any other content.\n\Conversation content:\n")
     messages = [
         {"role": "system", "content": "You are an expert in analyzing dialogue topics. No more than two topics."},
         {"role": "user", "content": prompt}
     ]
     system_prompt = "You are an expert in analyzing dialogue topics. No more than two topics."
+    prefix = system_prompt + prompt_prefix
     query_prompt = ("Please analyze the following dialogue and generate multiple subtopic summaries (if applicable), with a maximum of two themes.\n"
               "Each summary should include the subtopic name, keywords (separated by commas), and the summary text, formatted as a JSON array, with an example format as follows:\n"
               "[\n  {\"theme\": \"Business trip\", \"keywords\": [\"Business trip\", \"Itinerary\", \"Work\"], \"content\": \" User mentioned the troubles related to business trips.\"},\n  {\"theme\": \"Health\", \"keywords\": [\"Cold\", \"Uncomfortable\", \"Sick\"], \"content\": \"User reported feeling unwell due to a cold.\"}\n]\n"
               "Please directly output the JSON array, without adding any other content.\n\Conversation content:\n")
     fusionrag_prompt_list = [text]
-    print("调用 GPT 生成多子主题摘要...")
+    # print("调用 GPT 生成多子主题摘要...")
 
     ##mengyao_debug fusionrag_bad_case
     if os.environ.get("FUSIONRAG", "false").lower() == "true":
@@ -315,7 +320,7 @@ def gpt_generate_multi_summary(text, client):
         summaries = json.loads(response_text)
     except Exception:
         summaries = []
-    return {"input": text, "summaries": summaries}, prompt_tokens, completion_tokens, fusionrag_stats
+    return {"input": text, "summaries": summaries}, prompt_tokens, completion_tokens, fusionrag_stats, prefix
 
 # def gpt_personality_analysis(dialogs, client):
 #     prompt = ("Please analyze the following conversation and extract the user profile information and user private data."
@@ -609,7 +614,7 @@ def llm_extract_keywords(text, client):
     else:
         keywords_text, prompt_tokens, completion_tokens, fusiorag_stats = gpt_generate_answer(prompt, messages, client)
     keywords = [w.strip() for w in keywords_text.split(",") if w.strip()]
-    return set(keywords), prompt_tokens, completion_tokens, fusiorag_stats
+    return set(keywords), prompt_tokens, completion_tokens, fusiorag_stats, system_prompt+prefix
 
 def compute_time_decay(session_timestamp, current_timestamp, tau=3600):
     from datetime import datetime

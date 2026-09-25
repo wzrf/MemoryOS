@@ -180,25 +180,53 @@ def llm_judge(question: str, reference: str, prediction: str,
 
 
 def run_dir(path: str, name: str):
+    if "qwen" in name.lower():
+        model_path = "/mnt/qjhs-sh-lab-01/models/Qwen3-8B/"
+    elif "glm" in name.lower():
+        model_path = "/mnt/qjhs-sh-lab-04/models/GLM-4.5-Air"
+    elif "kimi" in name.lower():
+        model_path = "/mnt/qjhs-sh-lab-01/models/Kimi-K2.6"
+    text_2_len = {
+
+    }
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     json_files = Path(path).glob("*.json")
     all_prompt_tokens = []
     all_completion_tokens = []
+    all_prefix_len = []
     for file in json_files:
         if name.split("_")[0] in file.name:
             with open(file, "r", encoding="utf-8") as f:
                 data = json.load(f)
+                if "radix_cache" in data:
+                    radix_cache = data["radix_cache"]
+                    cur_prefix_len = 0
+                    for prefix in radix_cache:
+                        if prefix not in text_2_len:
+                            prefix_len = len(tokenizer.tokenize(prefix))
+                            text_2_len[prefix] = prefix_len
+                        cur_prefix_len += text_2_len[prefix]
+                    all_prefix_len.append(cur_prefix_len)
 
-            prompt_tokens = data["prompt_tokens"]
-            completion_tokens = data["completion_tokens"]
+                prompt_tokens = data["prompt_tokens"]
+                completion_tokens = data["completion_tokens"]
 
-            if prompt_tokens > 0:
-                all_prompt_tokens.append(prompt_tokens)
-            if completion_tokens > 0:
-                all_completion_tokens.append(completion_tokens)
+                if prompt_tokens > 0:
+                    all_prompt_tokens.append(prompt_tokens)
+                if completion_tokens > 0:
+                    all_completion_tokens.append(completion_tokens)
+
+    sample_rate = len(all_prompt_tokens) / len(all_prefix_len)
+    print(f"sample_rate={sample_rate}")
 
     if len(all_prompt_tokens) > 0:
-        print(f"{name}: average prompt_tokens: {sum(all_prompt_tokens)/len(all_prompt_tokens)} "
-              f"average completion_tokens: {sum(all_completion_tokens)/len(all_completion_tokens)}")
+        print(f"{name}: average prompt_tokens: {sum(all_prompt_tokens) / len(all_prompt_tokens)} \n"
+              f"\033[33maverage prompt tokens without prefix:: {(sum(all_prompt_tokens) - sum(all_prefix_len) * sample_rate) / len(all_completion_tokens)}\033[0m\n"
+              f"average completion_tokens: {sum(all_completion_tokens) / len(all_completion_tokens)}\n"
+              f"file len={len(all_prompt_tokens)}")
+
+    print("="*100)
 
 
 def simple_tokenize(text):
@@ -608,14 +636,16 @@ def process_halumem_dir(dir_path: str):
 
 if __name__ == "__main__":
     # 配置你的 JSON 数据文件路径
-    # run_dir("./token_consumption", "locomo_qwen3")
-    # run_dir("./token_consumption", "longmemeval_qwen3")
-    # run_dir("./token_consumption_GLM-4.5-Air", "locomo_glm")
-    # run_dir("./token_consumption_GLM-4.5-Air", "longmemeval_glm")
-    # run_dir("./token_consumption_Kimi-K2.6", "locomo_kimi")
-    # run_dir("./token_consumption_Kimi-K2.6", "longmemeval_kimi")
+    # run_dir("./token_consumption_fusionrag/", "locomo_qwen3_fusionrag")
+    run_dir("./token_consumption", "locomo_qwen3")
+    run_dir("./token_consumption", "longmemeval_qwen3")
+    run_dir("./token_consumption_GLM-4.5-Air", "locomo_glm")
+    run_dir("./token_consumption_GLM-4.5-Air", "longmemeval_glm")
+    run_dir("./token_consumption_Kimi-K2.6", "locomo_kimi")
+    run_dir("./token_consumption_Kimi-K2.6", "longmemeval_kimi")
+
     tasks = [
-        ("./results_fusionrag/locomo_result.json", "locomo_fusionrag")
+        # ("./results_fusionrag/locomo_result.json", "locomo_fusionrag")
         # ("./results/locomo_result.json", "locomo-qwen3"),
         # ("./results_GLM-4.5-Air/locomo_result.json", "locomo-glm"),
         # ("./results_Kimi-K2.6/locomo_result.json", "locomo-kimi"),
