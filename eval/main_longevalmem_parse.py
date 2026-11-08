@@ -144,7 +144,7 @@ def generate_system_response_longmemeval(query, query_date, short_mem, long_mem,
         {"role": "user", "content": user_prompt}
     ]
 
-    response, prompt_tokens, completion_tokens, _ = client_inst.chat_completion_with_usage(
+    response, prompt_tokens, completion_tokens, _, _ = client_inst.chat_completion_with_usage(
         model="qwen3-8b", messages=messages, temperature=0.7, max_tokens=2000
     )
     return response, system_prompt, user_prompt, prompt_tokens, completion_tokens

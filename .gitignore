@@ -1,2 +1,5 @@
-eval/mem_tmp_loco*
+eval/results_*
+eval/token_consumption*
+eval/data/
+eval/mem_tmp_*
 eval/results

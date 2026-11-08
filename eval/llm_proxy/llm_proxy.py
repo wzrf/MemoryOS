@@ -8,7 +8,7 @@ import uvicorn
 app = FastAPI()
 
 BACKENDS = [
-    "http://127.0.0.1:20000",
+
     "http://127.0.0.1:20001",
     "http://127.0.0.1:20002",
     "http://127.0.0.1:20003",

@@ -1,4 +1,5 @@
 import os
+import time
 
 from utils import gpt_summarize, generate_id, get_timestamp, gpt_update_profile, gpt_generate_multi_summary
 
@@ -12,6 +13,7 @@ class DynamicUpdate:
         self.last_evicted_page = None
         self.calls = 0
         self.radix_cache = []
+        self.call_record = []
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.fusionrag_stats = []
@@ -19,6 +21,7 @@ class DynamicUpdate:
     def get_stats(self):
         return {
             "calls": self.calls,
+            "call_record": self.call_record,
             "radix_cache": self.radix_cache,
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
@@ -59,7 +62,7 @@ Return ONLY "true" or "false".
 Previous Page:"""
 
         fusionrag_list = [
-            f"""Previous Page:
+            f""":
 User: {previous_page.get("user_input", "")}
 Assistant: {previous_page.get("agent_response", "")}""",
 
@@ -71,8 +74,9 @@ Assistant: {current_page.get("agent_response", "")}"""]
 
         fusionrag_list[0] = prefix + fusionrag_list[0]
 
+        time_start = time.time()
         if os.environ.get("FUSIONRAG", "false").lower() == "true": ##mengyao_debug first call.
-            response, prompt_tokens, completion_tokens, fusionrag_stats = self.client.chat_completion_fusionrag(
+            response, prompt_tokens, completion_tokens, fusionrag_stats, usage = self.client.chat_completion_fusionrag(
                 model="gpt-4o-mini",
                 system_prompt=system_prompt,
                 fusionrag_cache_list=fusionrag_list,
@@ -84,14 +88,24 @@ Assistant: {current_page.get("agent_response", "")}"""]
             )
             fusionrag_stats["reuse_type"] = "reuse_prefill"
         else:
-            response, prompt_tokens, completion_tokens, fusionrag_stats = self.client.chat_completion_with_usage(
+            response, prompt_tokens, completion_tokens, fusionrag_stats, usage = self.client.chat_completion_with_usage(
                 model="gpt-4o-mini",
                 messages=messages,
                 temperature=0.0,
                 max_tokens=10
             )
+        time_end = time.time()
+        call_record = {
+            "metadata_messages": messages,
+            "prefix": system_prompt + prefix,
+            "response": response,
+            "usage": usage,
+            "time": time_end - time_start,
+        }
+
         self.calls += 1
         self.radix_cache.append(system_prompt + prefix)
+        self.call_record.append(call_record)
         self.prompt_tokens += prompt_tokens
         self.completion_tokens += completion_tokens
         self.fusionrag_stats.append(fusionrag_stats)
@@ -153,8 +167,9 @@ Assistant: {current_page.get("agent_response", "")}"""]
 
         query_prompt = "Updated Meta-summary:"
         fusionrag_prompt_list[0] = prefix + fusionrag_prompt_list[0]
+        time_start = time.time()
         if os.environ.get("FUSIONRAG", "false").lower() == "true":## mengyao_debug 首次调用，不会触发
-            content, prompt_tokens, completion_tokens, fusionrag_stats = self.client.chat_completion_fusionrag(
+            content, prompt_tokens, completion_tokens, fusionrag_stats, usage = self.client.chat_completion_fusionrag(
                 model="qwen3-8b",
                 system_prompt=system_prompt,
                 prefix="",
@@ -165,14 +180,25 @@ Assistant: {current_page.get("agent_response", "")}"""]
             )
             fusionrag_stats["reuse_type"] = "reuse_prefill"
         else:
-            content, prompt_tokens, completion_tokens, fusionrag_stats = self.client.chat_completion_with_usage(
+            content, prompt_tokens, completion_tokens, fusionrag_stats, usage = self.client.chat_completion_with_usage(
                 model="qwen3-8b",
                 messages=messages,
                 temperature=0.3,
                 max_tokens=100
             )
+        time_end = time.time()
+
+        call_record = {
+            "metadata_messages": messages,
+            "prefix": system_prompt + prefix,
+            "response": content,
+            "usage": usage,
+            "time": time_end - time_start,
+        }
+
         self.calls += 1
         self.radix_cache.append(prefix + system_prompt)
+        self.call_record.append(call_record)
         self.prompt_tokens += prompt_tokens
         self.completion_tokens += completion_tokens
         self.fusionrag_stats.append(fusionrag_stats)
@@ -258,9 +284,10 @@ Assistant: {current_page.get("agent_response", "")}"""]
         # 3. 将所有用户输入拼接用于主题分析
         input_text = "\n".join([f"User: {page.get('user_input','')}\n" for page in pages])
         # print("动态更新：调用 GPT 生成多子主题摘要...")
-        multi_summary, prompt_tokens, completion_tokens, fusionrag_stats, prefix_ = gpt_generate_multi_summary(input_text, self.client)
+        multi_summary, prompt_tokens, completion_tokens, fusionrag_stats, prefix_, call_record = gpt_generate_multi_summary(input_text, self.client)
         fusionrag_stats["reuse_type"] = "reuse_prefill"
         self.calls += 1
+        self.call_record.append(call_record)
         self.radix_cache.append(prefix_)
         self.prompt_tokens += prompt_tokens
         self.completion_tokens += completion_tokens
@@ -272,7 +299,7 @@ Assistant: {current_page.get("agent_response", "")}"""]
             sub_key_words = summary_dict.get("keywords", [])
             
             print(f"动态更新：处理子主题【{summary_dict.get('theme','')}】，插入中期记忆...")
-            prompt_tokens, completion_tokens, fusiorag_stats_list, radix_cache_list = self.mid_term_memory.insert_pages_into_session(
+            prompt_tokens, completion_tokens, fusiorag_stats_list, radix_cache_list, call_record_list = self.mid_term_memory.insert_pages_into_session(
                 sub_summary, 
                 sub_key_words, 
                 pages,  # 传入已经处理好的完整pages
@@ -282,6 +309,7 @@ Assistant: {current_page.get("agent_response", "")}"""]
             self.prompt_tokens += prompt_tokens
             self.completion_tokens += completion_tokens
             self.radix_cache.extend(radix_cache_list)
+            self.call_record.extend(call_record_list)
             self.fusionrag_stats.extend(fusiorag_stats_list)
 
     def update_long_term(self, user_id, new_profile_data, knowledge_text):

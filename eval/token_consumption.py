@@ -7,6 +7,7 @@ import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
+from tqdm import tqdm
 import nltk
 from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
 import numpy as np
@@ -36,6 +37,58 @@ TEMPLATE = """Decide whether the candidate answer is correct.
   {{"correct": true}}
   or
   {{"correct": false}}"""
+
+prefix_1 = """
+# Personality and User Data Analysis Task
+Analyze the conversation and output in EXACTLY this format:
+
+【User Profile】
+1. Core Psychological Traits:
+   - [Trait]: [Positive/Negative/Neutral] (Evidence)
+   - (Max 5 most prominent traits)
+
+2. Content Preferences:
+   - [Topic]: [Like/Dislike/Neutral] (Evidence)
+   - (Max 5 strongest preferences)
+
+3. Interaction Style:
+   - [Style]: [Preference] (Evidence)
+   - (e.g., Direct/Indirect, Detailed/Concise)
+
+4. Value Alignment:
+   - [Value]: [Strong/Weak] (Evidence)
+   - (e.g., Honesty, Helpfulness)
+
+【User Data】
+- [Fact 1]: [Details] (e.g., "User mentioned visiting a park on April 1st, 2025 in New York.")
+- [Fact 2]: [Details] (e.g., "User likes pizza, enjoys sci-fi movies, and dislikes rainy weather.")
+- (Include events, dates, locations, preferences, or other general or private information explicitly mentioned in the conversation. If none, write "None.")
+
+Conversation:
+"""
+
+system_prompt_1 = """You are a personality and user data analysis engine. Rules:
+1. Extract ONLY observable traits and data with direct evidence.
+2. Include general user data such as events, dates, locations, and preferences.
+3. Use concise and factual statements.
+4. If no relevant information is found, output "None"."""
+
+prefix_2 = """
+        # Profile Merge Task
+    Consolidate these profiles while:
+    - Preserving all valid observations
+    - Resolving conflicts
+    - Adding new dimensions
+    """
+system_prompt_2 = """You are a profile integration system. Your rules:
+1. NEVER discard verified information
+2. Conflict resolution hierarchy:
+   Explicit statement > Implied trait > Assumption
+3. Add timestamps when traits change:
+   (Updated: [date]) for modified traits
+4. Preserve the 4-category structure"""
+
+
 
 def text_sha256(text: str) -> str:
     """Return SHA256 hex digest of the text."""
@@ -195,11 +248,19 @@ def run_dir(path: str, name: str):
     all_prompt_tokens = []
     all_completion_tokens = []
     all_prefix_len = []
+    prefix_1_len = len(tokenizer.tokenize(prefix_1 + system_prompt_1))
+    prefix_2_len = len(tokenizer.tokenize(prefix_2 + system_prompt_2))
     for file in json_files:
-        if name.split("_")[0] in file.name:
+        ##mengyao_debug 之前是三个数据集混在一起的，用name来区分；halumem是单独的文件夹。这里有点乱了。
+        if "halumem" in name or name.split("_")[0] in file.name:
             with open(file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                if "radix_cache" in data:
+                if "call_record" in data:
+                    cur_prefix_len = 0
+                    for record in data["call_record"]:
+                        cur_prefix_len += record["usage"]["prompt_tokens_details"]["cached_tokens"]
+                    all_prefix_len.append(cur_prefix_len)
+                elif "radix_cache" in data:
                     radix_cache = data["radix_cache"]
                     cur_prefix_len = 0
                     for prefix in radix_cache:
@@ -207,6 +268,10 @@ def run_dir(path: str, name: str):
                             prefix_len = len(tokenizer.tokenize(prefix))
                             text_2_len[prefix] = prefix_len
                         cur_prefix_len += text_2_len[prefix]
+                    calls_diff = data["calls"] - len(radix_cache)
+                    ##mengyao_debug 这部分之前忘了统计了，如果call数目和记录的radix_cache对不上的话，就加上这个。
+                    if calls_diff > 0:
+                        cur_prefix_len += calls_diff / 2 * (prefix_1_len + prefix_2_len)
                     all_prefix_len.append(cur_prefix_len)
 
                 prompt_tokens = data["prompt_tokens"]
@@ -508,12 +573,16 @@ def process_eval_file(file_path: str, dataset_name: str, use_llm_judge: bool = F
         print("No metrics found.")
 
 
-def process_halumem_dir(dir_path: str):
-    """处理 results_memoryos_halumem 目录，统计每个问题类型的平均 token 消耗和指标"""
+def process_halumem_dir(dir_path: str, use_llm_judge: bool = False,
+                         api_key: str = None, endpoint: str = None, model: str = None,
+                         max_workers: int = 32):
+    """处理 results_memoryos_halumem 目录，统计每个问题类型的平均 token 消耗和指标。
+    若 use_llm_judge=True，则并发调用 LLM judge 补全每条记录的 correct 字段。"""
     import json
     from pathlib import Path
     from collections import defaultdict
     import numpy as np
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     dir_p = Path(dir_path)
     if not dir_p.exists() or not dir_p.is_dir():
@@ -525,9 +594,18 @@ def process_halumem_dir(dir_path: str):
         print(f"No JSON files found in {dir_path}")
         return
 
-    # 按问题类型分组存储数据
-    groups = defaultdict(list)
+    # LLM judge 配置
+    if use_llm_judge:
+        if api_key is None:
+            api_key = os.environ.get("OPENAI_API_KEY", "sk-dummy")
+        if endpoint is None:
+            endpoint = os.environ.get("OPENAI_BASE_URL", "http://127.0.0.1:30002/v1")
+        if model is None:
+            model = os.environ.get("LLM_MODEL", "GLM-5.3")
+        print(f"LLM judge configured: endpoint={endpoint}, model={model}")
 
+    # 第一遍：收集所有 (file_idx, item_idx, item)
+    item_records = []  # 顺序列表，用于后续 judge / 聚合
     for file in json_files:
         try:
             with open(file, "r", encoding="utf-8") as f:
@@ -540,45 +618,85 @@ def process_halumem_dir(dir_path: str):
             print(f"Error: Expected a JSON array in {file}")
             continue
 
-        for item in data:
-            question_type = item.get("question_type", "unknown")
+        for idx, item in enumerate(data):
+            item_records.append((file, idx, item))
 
-            # 收集 token 相关字段
-            turn_build_memory_prompt_tokens = item.get("turn_build_memory_prompt_tokens", 0)
-            turn_build_memory_completion_tokens = item.get("turn_build_memory_completion_tokens", 0)
-            retrieval_prompt_tokens = item.get("retrieval_prompt_tokens", 0)
-            retrieval_completion_tokens = item.get("retrieval_completion_tokens", 0)
-            answer_prompt_tokens = item.get("answer_prompt_tokens", 0)
-            answer_completion_tokens = item.get("answer_completion_tokens", 0)
+    # 并发执行 LLM judge
+    judge_results = [None] * len(item_records)
+    if use_llm_judge:
+        print(f"Starting concurrent LLM judge with {max_workers} workers...")
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_idx = {}
+            for list_idx, (file, _, item) in enumerate(item_records):
+                question = item.get("question", "")
+                prediction = item.get("answer", "")
+                reference = item.get("reference", "")
+                future = executor.submit(
+                    llm_judge,
+                    question=question,
+                    reference=reference,
+                    prediction=prediction,
+                    api_key=api_key,
+                    endpoint=endpoint,
+                    model=model,
+                    use_cache=True
+                )
+                future_to_idx[future] = list_idx
+            for future in tqdm(as_completed(future_to_idx), total=len(future_to_idx), desc="LLM judge"):
+                list_idx = future_to_idx[future]
+                try:
+                    judge_results[list_idx] = 1.0 if future.result() else 0.0
+                except Exception as e:
+                    print(f"LLM judge failed for item {list_idx}: {e}")
+                    judge_results[list_idx] = None
+        print("LLM judge completed.")
 
-            # 计算总和
-            retrieval_prompt_total = retrieval_prompt_tokens + answer_prompt_tokens
-            retrieval_completion_total = retrieval_completion_tokens + answer_completion_tokens
+    # 第二遍：按问题类型分组聚合
+    groups = defaultdict(list)
+    for list_idx, (file, _, item) in enumerate(item_records):
+        question_type = item.get("question_type", "unknown")
 
-            # 获取预测和参考文本
-            prediction = item.get("answer", "")
-            reference = item.get("reference", "")
+        # 收集 token 相关字段
+        turn_build_memory_prompt_tokens = item.get("turn_build_memory_prompt_tokens", 0)
+        turn_build_memory_completion_tokens = item.get("turn_build_memory_completion_tokens", 0)
+        retrieval_prompt_tokens = item.get("retrieval_prompt_tokens", 0)
+        retrieval_completion_tokens = item.get("retrieval_completion_tokens", 0)
+        answer_prompt_tokens = item.get("answer_prompt_tokens", 0)
+        answer_completion_tokens = item.get("answer_completion_tokens", 0)
 
-            # 计算指标
-            f1_score = item.get("metrics", {}).get("f1", 0.0)
+        # 计算总和
+        retrieval_prompt_total = retrieval_prompt_tokens + answer_prompt_tokens
+        retrieval_completion_total = retrieval_completion_tokens + answer_completion_tokens
+
+        # 获取预测和参考文本
+        prediction = item.get("answer", "")
+        reference = item.get("reference", "")
+
+        # 计算指标
+        f1_score = item.get("metrics", {}).get("f1", 0.0)
+
+        # 优先使用 LLM judge 结果，否则 fallback 到 metrics.correct
+        if use_llm_judge and judge_results[list_idx] is not None:
+            correct_score = judge_results[list_idx]
+        else:
             correct = item.get("metrics", {}).get("correct", False)
             correct_score = 1.0 if correct else 0.0
 
-            # 计算 BLEU 分数
-            bleu_scores = calculate_bleu_scores(prediction, reference)
+        # 计算 BLEU 分数
+        bleu_scores = calculate_bleu_scores(prediction, reference)
 
-            groups[question_type].append({
-                "turn_build_memory_prompt_tokens": turn_build_memory_prompt_tokens,
-                "turn_build_memory_completion_tokens": turn_build_memory_completion_tokens,
-                "retrieval_prompt_total": retrieval_prompt_total,
-                "retrieval_completion_total": retrieval_completion_total,
-                "f1": f1_score,
-                "correct": correct_score,
-                "bleu1": bleu_scores.get("bleu1", 0.0),
-                "bleu2": bleu_scores.get("bleu2", 0.0),
-                "bleu3": bleu_scores.get("bleu3", 0.0),
-                "bleu4": bleu_scores.get("bleu4", 0.0),
-            })
+        groups[question_type].append({
+            "turn_build_memory_prompt_tokens": turn_build_memory_prompt_tokens,
+            "turn_build_memory_completion_tokens": turn_build_memory_completion_tokens,
+            "retrieval_prompt_total": retrieval_prompt_total,
+            "retrieval_completion_total": retrieval_completion_total,
+            "f1": f1_score,
+            "correct": correct_score,
+            "bleu1": bleu_scores.get("bleu1", 0.0),
+            "bleu2": bleu_scores.get("bleu2", 0.0),
+            "bleu3": bleu_scores.get("bleu3", 0.0),
+            "bleu4": bleu_scores.get("bleu4", 0.0),
+        })
 
     if not groups:
         print("No data found.")
@@ -637,14 +755,22 @@ def process_halumem_dir(dir_path: str):
 if __name__ == "__main__":
     # 配置你的 JSON 数据文件路径
     # run_dir("./token_consumption_fusionrag/", "locomo_qwen3_fusionrag")
-    run_dir("./token_consumption", "locomo_qwen3")
-    run_dir("./token_consumption", "longmemeval_qwen3")
-    run_dir("./token_consumption_GLM-4.5-Air", "locomo_glm")
-    run_dir("./token_consumption_GLM-4.5-Air", "longmemeval_glm")
-    run_dir("./token_consumption_Kimi-K2.6", "locomo_kimi")
-    run_dir("./token_consumption_Kimi-K2.6", "longmemeval_kimi")
+
+    # run_dir("./token_consumption", "locomo_qwen3")
+    # run_dir("./token_consumption_GLM-4.5-Air", "locomo_glm")
+    # run_dir("./token_consumption_Kimi-K2.6", "locomo_kimi")
+    #
+    # run_dir("./token_consumption", "longmemeval_qwen3")
+    # run_dir("./token_consumption_GLM-4.5-Air", "longmemeval_glm")
+    # run_dir("./token_consumption_Kimi-K2.6", "longmemeval_kimi")
+
+    run_dir("./token_consumption_halumem", "halumem_qwen3")
+    run_dir("./token_consumption_halumem_GLM-4.5-Air", "halumem_glm")
+    run_dir("./token_consumption_halumem_Kimi-K2.6", "halumem_kimi")
 
     tasks = [
+        ("./results_longmemeval_GLM_BGE_rerank_complete_common/longmemeval_result.json", "longmemeval-glm-BGE-rerank"),
+        ("./results_GLM-4.5-Air_BGE_rerank/locomo_result.json", "locomo-glm-BGE-rerank"),
         # ("./results_fusionrag/locomo_result.json", "locomo_fusionrag")
         # ("./results/locomo_result.json", "locomo-qwen3"),
         # ("./results_GLM-4.5-Air/locomo_result.json", "locomo-glm"),
@@ -658,5 +784,7 @@ if __name__ == "__main__":
     for file_path, name in tasks:
         process_eval_file(file_path, name, use_llm_judge=True, max_workers=max_workers)
 
-    # 处理 HALUMEM 结果目录
-    # process_halumem_dir("./results_memoryos_halumem")
+    # 处理 HALUMEM 结果目录（按模型区分的文件夹，并发调用 LLM judge 计算准确率）
+    process_halumem_dir("./results_memoryos_halumem", use_llm_judge=True, max_workers=max_workers)
+    process_halumem_dir("./results_memoryos_halumem_GLM-4.5-Air", use_llm_judge=True, max_workers=max_workers)
+    process_halumem_dir("./results_memoryos_halumem_Kimi-K2.6", use_llm_judge=True, max_workers=max_workers)

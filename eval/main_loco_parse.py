@@ -49,19 +49,23 @@ def update_user_profile_from_top_segment(mid_mem, long_mem, sample_id, client, d
             
             old_profile = long_mem.get_raw_user_profile(sample_id)
             
-            result, prompt_tokens, completion_tokens, fusionrag_stats_list = gpt_personality_analysis(un_analyzed, client)
-            dynamic_updater.calls += 1
+            result, prompt_tokens, completion_tokens, fusionrag_stats_list, prefix_len, call_records = gpt_personality_analysis(un_analyzed, client)
+            dynamic_updater.calls += 2
+            dynamic_updater.radix_cache.extend(prefix_len)
+            dynamic_updater.call_record.extend(call_records)
             new_profile = result["profile"]
             new_private = result["private"]
             assistant_knowledge = result["assistant_knowledge"]
             
             if old_profile:
-                updated_profile, prompt_tokens_1, completion_tokens_1, fusionrag_stats = gpt_update_profile(old_profile, new_profile, client)
+                updated_profile, prompt_tokens_1, completion_tokens_1, fusionrag_stats, call_record, prefix_len = gpt_update_profile(old_profile, new_profile, client)
                 fusionrag_stats["reuse_type"] = "reuse_decode"
                 prompt_tokens += prompt_tokens_1
+                dynamic_updater.call_record.append(call_record)
                 completion_tokens += completion_tokens_1
                 dynamic_updater.fusionrag_stats.append(fusionrag_stats)
                 dynamic_updater.calls += 1
+                dynamic_updater.radix_cache.append(prefix_len)
             else:
                 updated_profile = new_profile
                 
@@ -195,7 +199,7 @@ def generate_system_response_with_meta(query, short_mem, long_mem, retrieval_que
                 {"role": "user", "content": user_prompt}
             ]
 
-            response, prompt_tokens, completion_tokens, _ = client.chat_completion_with_usage(model=LLM_MODEL, messages=messages, temperature=0.7, max_tokens=2000)
+            response, prompt_tokens, completion_tokens, _, _ = client.chat_completion_with_usage(model=LLM_MODEL, messages=messages, temperature=0.7, max_tokens=2000)
     time_answer = time.time() - time_start
     return response, system_prompt, user_prompt, prompt_tokens, completion_tokens, time_answer, question_origin
 

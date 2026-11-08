@@ -125,10 +125,13 @@ def calculate_simple_f1(prediction: str, reference: str) -> float:
 # ============================================================================
 
 class HaluMemMemoryOSTester:
-    def __init__(self, use_llm_judge: bool = False, mem_dir: str = "./mem_tmp_halumem"):
+    def __init__(self, use_llm_judge: bool = False, mem_dir: str = "./mem_tmp_halumem",
+                 token_consumption_dir: str = "./token_consumption_halumem"):
         self.use_llm_judge = use_llm_judge
         self.mem_dir = mem_dir
+        self.token_consumption_dir = token_consumption_dir
         os.makedirs(self.mem_dir, exist_ok=True)
+        os.makedirs(self.token_consumption_dir, exist_ok=True)
         if use_llm_judge:
             self.judge_client = AnswerJudge(
                 api_key=JUDGE_API_KEY,
@@ -185,7 +188,7 @@ class HaluMemMemoryOSTester:
 
         # 初始化 MemoryOS 三级存储架构与动态更新器
         short_mem = ShortTermMemory(max_capacity=5, file_path=short_mem_path)
-        mid_mem = MidTermMemory(max_capacity=2000, file_path=mid_mem_path, embedding_model=embedding_model)
+        mid_mem = MidTermMemory(max_capacity=2000, file_path=mid_mem_path, embedding_model=embedding_model, client=client)
         long_mem = LongTermMemory(file_path=long_mem_path, embedding_model=embedding_model)
         dynamic_updater = DynamicUpdate(
             short_mem, mid_mem, long_mem, topic_similarity_threshold=0.6, client=client
@@ -229,6 +232,11 @@ class HaluMemMemoryOSTester:
 
             total_build_prompt_tokens += turn_build_prompt_tokens
             total_build_completion_tokens += turn_build_completion_tokens
+
+            # mengyao_debug: write everytime, easy to debug.
+            token_consumption_file = os.path.join(self.token_consumption_dir, f"{safe_sample_id}.json")
+            with open(token_consumption_file, "w") as f:
+                json.dump(dynamic_updater.get_stats(), f, indent=4)
 
             # ----------------------------------------------------------------
             # 步骤 2：对当前 Session 内的 Question 进行检索与回答
@@ -287,7 +295,7 @@ class HaluMemMemoryOSTester:
                     {"role": "user", "content": user_prompt}
                 ]
 
-                answer, answer_prompt_tokens, answer_completion_tokens = client.chat_completion_with_usage(
+                answer, answer_prompt_tokens, answer_completion_tokens, _, _ = client.chat_completion_with_usage(
                     model="qwen3-8b", messages=messages, temperature=0.7, max_tokens=2000
                 )
                 answer_time = time.time() - answer_start
@@ -296,11 +304,14 @@ class HaluMemMemoryOSTester:
                 f1_score = calculate_simple_f1(answer, reference)
                 is_correct = False
                 if self.use_llm_judge and self.judge_client:
-                    judge_res = self.judge_client.judge(
-                        question=question,
-                        golden_answer=reference,
-                        generated_answer=answer
-                    )
+                    try:
+                        judge_res = self.judge_client.judge(
+                            question=question,
+                            golden_answer=reference,
+                            generated_answer=answer
+                        )
+                    except Exception as e:
+                        judge_res = ""
                     is_correct = (judge_res.lower() == "correct")
 
                 metrics = {
@@ -375,11 +386,41 @@ def main():
                         help='Directory to save evaluation results')
     parser.add_argument('--mem-dir', type=str, default='./mem_tmp_halumem',
                         help='Directory to save temporary memory files')
+    parser.add_argument('--LLM_MODEL', type=str, default='qwen3-8b',
+                        help='llm model name (also used to differentiate folders)')
+    parser.add_argument('--API_BASE_URL', type=str, default='',
+                        help='LLM API endpoint; if empty, use env LLM_BASE_URL')
     args = parser.parse_args()
+
+    # 根据 --API_BASE_URL 重新初始化 client
+    global client
+    if args.API_BASE_URL:
+        client = OpenAIClient(
+            api_key=LLM_API_KEY,
+            base_url=args.API_BASE_URL,
+            recomputation_rate=float(os.environ.get("recomputation_rate", 0.0)),
+            sglang_url="http://127.0.0.1:30003/v1/completions",
+            sglang_url_prefiller="http://127.0.0.1:30003/v1/completions",
+        )
+
+    # 根据模型区分文件夹
+    if args.LLM_MODEL.lower() != "qwen3-8b":
+        args.mem_dir += f"_{args.LLM_MODEL}"
+        args.output_dir += f"_{args.LLM_MODEL}"
+
+    token_consumption_dir = "./token_consumption_halumem"
+    if args.LLM_MODEL.lower() != "qwen3-8b":
+        token_consumption_dir += f"_{args.LLM_MODEL}"
+    os.makedirs(args.mem_dir, exist_ok=True)
+    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(token_consumption_dir, exist_ok=True)
+    print(f"mem_dir: {args.mem_dir}")
+    print(f"output_dir: {args.output_dir}")
+    print(f"token_consumption_dir: {token_consumption_dir}")
 
     samples = load_halumem_dataset(args.dataset)
 
-    max_workers = 16
+    max_workers = 20
     if os.environ.get("DEBUG") == "1":
         max_workers = 1
 
@@ -390,13 +431,14 @@ def main():
     else:
         model_path = MODEL_PATH
 
-    embedding_model = SentenceTransformer(model_path)
+    embedding_model = SentenceTransformer(model_path, device="cuda:0")
 
     def _worker(idx_sample):
         idx, sample = idx_sample
         tester = HaluMemMemoryOSTester(
             use_llm_judge=args.llm_judge,
-            mem_dir=args.mem_dir
+            mem_dir=args.mem_dir,
+            token_consumption_dir=token_consumption_dir,
         )
         emb_model = embedding_model
         return tester.run_single_sample(sample, idx, emb_model, save_dir=args.output_dir)
